@@ -16,6 +16,25 @@ import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
+import { formatRetryAfter } from "open-sse/services/accountFallback.js";
+import {
+  createRoutingTrace,
+  ensureCombo,
+  recordComboModel,
+  recordModelSelection,
+  recordPool,
+  recordAccountSelected,
+  recordAccountAttempt,
+} from "open-sse/services/routingTrace.js";
+import {
+  classifyPoolError,
+  resolvePoolSessionKey,
+  getSessionExcludedAccountIds,
+  getSessionRetryAt,
+  recordAccountFailure,
+  recordAccountSuccess,
+  POOL_ACTIONS,
+} from "open-sse/services/accountPool.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -110,6 +129,13 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
     const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings), comboModels);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+    const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded });
+    const runComboModel = async (b, m) => {
+      recordComboModel(trace, m, { status: "pending" });
+      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace);
+      recordComboModel(trace, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
+      return res;
+    };
 
     if (comboStrategy === "fusion") {
       log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
@@ -122,7 +148,7 @@ export async function handleChat(request, clientRawRequest = null) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+          return runComboModel(cleanRawReq, m);
         },
         log,
         comboName: modelStr,
@@ -136,10 +162,7 @@ export async function handleChat(request, clientRawRequest = null) {
     return handleComboChat({
       body,
       models: augmentedModels,
-      handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
-        adapterAdded
-      ),
+      handleSingleModel: withCapacityAdapterStripping(runComboModel, adapterAdded),
       log,
       comboName: modelStr,
       comboStrategy,
@@ -152,27 +175,33 @@ export async function handleChat(request, clientRawRequest = null) {
   const soloAugmented = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings), [modelStr]);
   if (soloAugmented.length > 1) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
+    const comboStrategy = getActiveAdapterStrategy(requiredCapabilities, settings);
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
+    const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded, kind: "capacity" });
+    const runAdapterModel = async (b, m) => {
+      recordComboModel(trace, m, { status: "pending" });
+      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace);
+      recordComboModel(trace, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
+      return res;
+    };
     return handleComboChat({
       body,
       models: soloAugmented,
-      handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
-        adapterAdded
-      ),
+      handleSingleModel: withCapacityAdapterStripping(runAdapterModel, adapterAdded),
       log,
       comboName: modelStr,
-      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings)
+      comboStrategy
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, createRoutingTrace({ requestedModel: modelStr }), contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null);
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, requestedModel = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, trace = null, requestedModel = null) {
+  const routing = trace || createRoutingTrace({ requestedModel: modelStr });
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -190,6 +219,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const keyAccess = await getKeyAccessContext(request);
       const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings), comboModels);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+      ensureCombo(routing, { name: modelStr, strategy: comboStrategy, adapterAdded, kind: "combo" });
+      const runComboModel = async (b, m) => {
+        recordComboModel(routing, m, { status: "pending" });
+        const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, routing);
+        recordComboModel(routing, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
+        return res;
+      };
 
       if (comboStrategy === "fusion") {
         log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
@@ -202,7 +238,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+            return runComboModel(cleanRawReq, m);
           },
           log,
           comboName: modelStr,
@@ -216,10 +252,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       return handleComboChat({
         body,
         models: augmentedModels,
-        handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
-          adapterAdded
-        ),
+        handleSingleModel: withCapacityAdapterStripping(runComboModel, adapterAdded),
         log,
         comboName: modelStr,
         comboStrategy,
@@ -231,17 +264,24 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
+  recordModelSelection(routing, { provider, model });
+  recordPool(routing, { provider });
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
   // Extract userAgent from request
   const userAgent = request?.headers?.get("user-agent") || "";
 
-  // Try with available accounts (fallback on errors)
-  const excludeConnectionIds = new Set();
+  // Provider account pool: all active connections of this provider are tried in
+  // selection order. A session-scoped cache remembers failures within the
+  // current conversation so a follow-up request does not retry an account that
+  // is still cooling down (the durable modelLock_* state covers the rest).
+  const poolSessionKey = resolvePoolSessionKey({ provider, headers: clientRawRequest?.headers, body });
+  const excludeConnectionIds = new Set(getSessionExcludedAccountIds(poolSessionKey, model));
   let lastError = null;
   let lastStatus = null;
   let lastHeaders = null;
+  let lastPoolAction = null;
 
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { requestedModel: requestedModel || model });
@@ -249,6 +289,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
+        // Every account rejected this exact model (unsupported / not in plan):
+        // surface the upstream error instead of a retry-after that implies the
+        // model might work later. Quota/rate-limit exhaustion still returns 503.
+        if (lastPoolAction === POOL_ACTIONS.CAPABILITY && lastStatus && lastError) {
+          log.warn("POOL", `[${provider}/${model}] no account supports this model (${lastStatus}) → returning upstream error`);
+          return errorResponse(lastStatus, `[${provider}/${model}] ${lastError}`);
+        }
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
@@ -258,11 +305,28 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
+      // Every remaining account was filtered by the session pool cache: expose
+      // the earliest cooldown so the client knows when the pool frees up again.
+      const retryAt = getSessionRetryAt(poolSessionKey, model);
+      if (retryAt && new Date(retryAt).getTime() > Date.now()) {
+        const errorMsg = lastError || `[${provider}/${model}] All accounts unavailable`;
+        const human = formatRetryAfter(retryAt);
+        log.warn("CHAT", `[${provider}/${model}] session pool cooling down (${human})`);
+        return unavailableResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, errorMsg, retryAt, human);
+      }
       log.warn("CHAT", "No more accounts available", { provider });
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
     }
 
     // Account selection shown in the unified "▶" line (acc:...)
+    if (excludeConnectionIds.size > 0 && log?.debug) {
+      log.debug("POOL", `[${provider}/${model}] selected ACC:${credentials.connectionName} · skipped ${excludeConnectionIds.size} cooling account(s)`);
+    }
+    recordAccountSelected(routing, {
+      connectionId: credentials.connectionId,
+      connectionName: credentials.connectionName,
+      reason: credentials.selectionReason,
+    });
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
 
     // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
@@ -285,11 +349,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       log,
       clientRawRequest,
       connectionId: credentials.connectionId,
+      routing,
       userAgent,
       apiKey,
       ccFilterNaming: !!chatSettings.ccFilterNaming,
       rtkEnabled: !!chatSettings.rtkEnabled,
       headroomEnabled: !!chatSettings.headroomEnabled,
+      headroomMode: chatSettings.headroomMode || "compress",
       headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,
       headroomCompressUserMessages: !!chatSettings.headroomCompressUserMessages,
       headroomTimeoutMs: chatSettings.headroomTimeoutMs,
@@ -322,7 +388,29 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) {
+      // Account served the request: forget session-scoped failures for it so it
+      // is immediately eligible again for the rest of the conversation.
+      recordAccountSuccess(poolSessionKey, credentials.connectionId, model);
+      return result.response;
+    }
+
+    // Decide at the account-pool level whether this failure is worth rotating.
+    // Explicit ERROR_RULES (429/quota/5xx/auth) keep their fallback semantics;
+    // malformed requests stop here; model-ineligibility retires the pair.
+    const poolError = classifyPoolError(result.status, result.error, credentials._connection?.backoffLevel || 0);
+
+    if (poolError.action === POOL_ACTIONS.NON_FALLBACK) {
+      recordAccountAttempt(routing, {
+        connectionId: credentials.connectionId,
+        name: credentials.connectionName,
+        status: result.status,
+        error: result.error,
+        action: "non-fallback",
+      });
+      log.warn("POOL", `[${provider}/${model}] permanent ${result.status} on ACC:${credentials.connectionName} → not rotating`);
+      return result.response;
+    }
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;
@@ -334,6 +422,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       );
       if (quotaResetMs) resetsAtMs = quotaResetMs;
     }
+    // Model ineligible for this account: pin a long model lock so later requests
+    // skip the pair without re-hitting upstream.
+    if (poolError.action === POOL_ACTIONS.CAPABILITY && !resetsAtMs) {
+      resetsAtMs = Date.now() + poolError.cooldownMs;
+    }
 
     // Exhausted Antigravity model is blocked only in RAM cache until upstream resetAt.
     // Do not persist a modelLock_* for this path.
@@ -341,12 +434,39 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       ? true
       : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs)).shouldFallback;
 
+    // Remember the failure for this conversation regardless of the durable lock,
+    // so subsequent requests in the same session skip the account immediately.
+    // When upstream reports a precise quota reset, keep the account parked until
+    // then (the session cache clamps to its own ceiling).
+    const poolCooldownMs = resetsAtMs && resetsAtMs > Date.now()
+      ? Math.max(poolError.cooldownMs, resetsAtMs - Date.now())
+      : poolError.cooldownMs;
+    recordAccountFailure(poolSessionKey, credentials.connectionId, {
+      model,
+      status: result.status,
+      cooldownMs: poolCooldownMs,
+      action: poolError.action,
+    });
+    recordAccountAttempt(routing, {
+      connectionId: credentials.connectionId,
+      name: credentials.connectionName,
+      status: result.status,
+      error: result.error,
+      action: poolError.action,
+      cooldownMs: poolCooldownMs,
+    });
+
     if (shouldFallback) {
-      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
+      if (poolError.action === POOL_ACTIONS.CAPABILITY) {
+        log.info("POOL", `[${provider}/${model}] ACC:${credentials.connectionName} model-ineligible (${result.status}) → next account`);
+      } else {
+        log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
+      }
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
       lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      lastPoolAction = poolError.action;
       continue;
     }
 

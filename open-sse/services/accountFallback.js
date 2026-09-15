@@ -13,14 +13,14 @@ export function getQuotaCooldown(backoffLevel = 0) {
 }
 
 /**
- * Check if error should trigger account fallback (switch to next account)
- * Config-driven: matches ERROR_RULES top-to-bottom (text rules first, then status)
+ * Find the first ERROR_RULES entry matching this status/error text.
+ * Text rules take priority over status rules (top-to-bottom).
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message text
- * @param {number} backoffLevel - Current backoff level for exponential backoff
- * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
+ * @param {string|null} provider - Include only generic rules and rules scoped to this provider
+ * @returns {object|null} Matched rule, or null when nothing matches
  */
-export function checkFallbackError(status, errorText, backoffLevel = 0, provider = null) {
+export function matchFallbackRule(status, errorText, provider = null) {
   const lowerError = errorText
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";
@@ -28,40 +28,50 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
   for (const rule of ERROR_RULES) {
     if (rule.provider && rule.provider !== provider) continue;
     // Text-based rule: match substring in error message
-    if (rule.text && lowerError && lowerError.includes(rule.text)) {
-      if (rule.backoff) {
-        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
-      }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
-    }
-
+    if (rule.text && lowerError && lowerError.includes(rule.text)) return rule;
     // Status-based rule: match HTTP status code
-    if (rule.status && rule.status === status) {
-      if (rule.backoff) {
-        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
-      }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
+    if (rule.status && rule.status === status) return rule;
+  }
+
+  return null;
+}
+
+/**
+ * Check if error should trigger account fallback (switch to next account)
+ * Config-driven: matches ERROR_RULES top-to-bottom (text rules first, then status)
+ * @param {number} status - HTTP status code
+ * @param {string} errorText - Error message text
+ * @param {number} backoffLevel - Current backoff level for exponential backoff
+ * @param {string|null} provider - Only match rules scoped to this provider (plus generic rules)
+ * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
+ */
+export function checkFallbackError(status, errorText, backoffLevel = 0, provider = null) {
+  const rule = matchFallbackRule(status, errorText, provider);
+  if (!rule) {
+    // Request-scoped client errors that matched no rule above: a 400 caused by the
+    // request itself (context overflow, malformed body, unsupported parameter) says
+    // nothing about the credential, so cooling the account down only removes a
+    // healthy connection from rotation. With a single connection it is worse: every
+    // later request in the window fails with a copy of this very error
+    // ("all 1 accounts locked for <model> | lastError=[400]: ..."), which hides the
+    // real cause from the caller and makes unrelated sessions look like they hit the
+    // same limit. Hand the upstream error back for this request instead.
+    // Account-scoped statuses keep their rules above (401/402/403/404/429), and the
+    // text rules still win for rate-limit / quota / capacity wording.
+    if (status >= 400 && status < 500 && status !== 401 && status !== 402 && status !== 403 && status !== 429) {
+      return { shouldFallback: false, cooldownMs: 0 };
     }
+
+    // Default: transient cooldown for any unmatched error
+    return { shouldFallback: true, cooldownMs: TRANSIENT_COOLDOWN_MS };
   }
 
-  // Request-scoped client errors that matched no rule above: a 400 caused by the
-  // request itself (context overflow, malformed body, unsupported parameter) says
-  // nothing about the credential, so cooling the account down only removes a
-  // healthy connection from rotation. With a single connection it is worse: every
-  // later request in the window fails with a copy of this very error
-  // ("all 1 accounts locked for <model> | lastError=[400]: ..."), which hides the
-  // real cause from the caller and makes unrelated sessions look like they hit the
-  // same limit. Hand the upstream error back for this request instead.
-  // Account-scoped statuses keep their rules above (401/402/403/404/429), and the
-  // text rules still win for rate-limit / quota / capacity wording.
-  if (status >= 400 && status < 500 && status !== 401 && status !== 402 && status !== 403 && status !== 429) {
-    return { shouldFallback: false, cooldownMs: 0 };
+  if (rule.backoff) {
+    const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
+    return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
   }
 
-  // Default: transient cooldown for any unmatched error
-  return { shouldFallback: true, cooldownMs: TRANSIENT_COOLDOWN_MS };
+  return { shouldFallback: true, cooldownMs: rule.cooldownMs };
 }
 
 /**
