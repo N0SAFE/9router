@@ -129,6 +129,7 @@ Main flow modules:
 - Format detection/provider config: `open-sse/services/provider.js`
 - Model parse/resolve: `src/sse/services/model.js`, `open-sse/services/model.js`
 - Account fallback logic: `open-sse/services/accountFallback.js`
+- Account pool (error classification + session failure cache): `open-sse/services/accountPool.js`
 - Translation registry: `open-sse/translator/index.js`
 - Stream transformations: `open-sse/utils/stream.js`, `open-sse/utils/streamHandler.js`
 - Usage extraction/normalization: `open-sse/utils/usageTracking.js`
@@ -238,6 +239,53 @@ flowchart TD
 ```
 
 Fallback decisions are driven by `open-sse/services/accountFallback.js` using status codes and error-message heuristics.
+
+### Account pool semantics (`open-sse/services/accountPool.js`)
+
+Whenever a provider has more than one active connection, the single-model path in
+`src/sse/handlers/chat.js` treats them as one pool and feeds each selected
+credential into the normal executor. The pool layer only decides *which* account
+gets the request and *when to move on*:
+
+- `classifyPoolError(status, errorText)` reuses `accountFallback.js` rules to
+  produce one of three actions:
+  - **fallback** — 429/quota/rate-limit/auth/5xx → cooldown the account (durable
+    `modelLock_*` via `markAccountUnavailable`) and try the next one.
+  - **capability** — "model not found / not supported for this account" →
+    retire that account+model pair (long model lock) and try the next account.
+    New model ids work automatically; no per-model alias or combo is needed.
+  - **non-fallback** — malformed request / context overflow → return to the
+    client immediately; rotating accounts cannot fix it.
+- A session-scoped, in-memory failure cache records which account failed for
+  which model in the current logical conversation (keyed by the client session
+  id / assistant-text hash, shared across accounts). Follow-up requests skip a
+  cooling-down account even before the durable DB lock is written, and the cache
+  is cleared for the winning account on success.
+- Works identically for every provider and every chat request format
+  (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`), because all of them
+  funnel through the same `handleSingleModelChat` loop. Combos are unaffected:
+  they still fan out over their own model list and call the single-model path.
+
+### Headroom compression modes
+
+The `headroomEnabled` + `headroomMode` settings choose how the optional
+[Headroom](https://github.com/headroomlabs-ai/headroom) integration is applied to
+chat requests (`headroomUrl` points at a local proxy):
+
+- **`compress`** (default) — `compressWithHeadroom()` in `open-sse/rtk/headroom.js`
+  POSTs the translated OpenAI-shaped messages to Headroom's `/v1/compress` and
+  writes the result back. Messages only; fail-open. Tool schemas, system prompts
+  and output shaping are out of scope for that endpoint by design.
+- **`pipeline`** — `open-sse/services/headroomPipeline.js` + the hook in
+  `open-sse/utils/proxyFetch.js` route the executor's own upstream inference calls
+  through Headroom using its per-request `x-headroom-base-url` override. AsyncLocalStorage
+  scopes the routing to `executor.execute()` so token refresh/usage calls stay direct,
+  only `/v1/{chat/completions,responses,messages}` paths are rewritten, loopback/private
+  upstreams are skipped, and connection failures fail open to the provider. This gives
+  the full Headroom pipeline (messages + tools + system + output shaping) with stock
+  Headroom — no fork. Requires the proxy; 9Router's account pool still selects the
+  credential before the Headroom hop. When using pipeline mode, keep Headroom's retries
+  disabled (`--retry-max-attempts 1`) so 429s reach the account pool immediately.
 
 ## OAuth Onboarding and Token Refresh Lifecycle
 
