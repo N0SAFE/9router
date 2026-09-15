@@ -39,12 +39,13 @@ function TimeAgo({ timestamp }) {
   return <>{timeAgo(timestamp)}</>;
 }
 
-function RecentRequests({ requests = [] }) {
+function RecentRequests({ requests = [], onSelect }) {
   return (
     <Card className="flex min-w-0 flex-col overflow-hidden" padding="sm" style={{ height: 480 }}>
       {/* Header */}
-      <div className="px-1 py-2 border-b border-border shrink-0">
+      <div className="flex items-center justify-between px-1 py-2 border-b border-border shrink-0">
         <span className="text-xs font-semibold text-text-muted uppercase tracking-wide">Recent Requests</span>
+        <span className="text-[10px] text-text-subtle">click to inspect</span>
       </div>
 
       {!requests.length ? (
@@ -55,7 +56,7 @@ function RecentRequests({ requests = [] }) {
             <thead className="sticky top-0 bg-bg z-10">
               <tr className="border-b border-border">
                 <th className="py-1.5 text-left font-semibold text-text-muted w-2"></th>
-                <th className="py-1.5 text-left font-semibold text-text-muted">Model</th>
+                <th className="py-1.5 text-left font-semibold text-text-muted">Model / Route</th>
                 <th className="py-1.5 text-right font-semibold text-text-muted whitespace-nowrap">In / Out</th>
                 <th className="py-1.5 text-right font-semibold text-text-muted">When</th>
               </tr>
@@ -64,11 +65,21 @@ function RecentRequests({ requests = [] }) {
               {requests.map((r, i) => {
                 const ok = !r.status || r.status === "ok" || r.status === "success";
                 return (
-                  <tr key={i} className="hover:bg-bg-subtle transition-colors">
+                  <tr
+                    key={i}
+                    onClick={() => onSelect?.(r)}
+                    className="cursor-pointer hover:bg-bg-subtle transition-colors"
+                  >
                     <td className="py-1.5">
                       <span className={`block w-1.5 h-1.5 rounded-full ${ok ? "bg-success" : "bg-error"}`} />
                     </td>
-                    <td className="py-1.5 font-mono truncate max-w-[120px]" title={r.model}>{r.model}</td>
+                    <td className="py-1.5 truncate max-w-[160px]" title={`${r.provider || "?"} · ${r.model}`}>
+                      <span className="block font-mono truncate">{r.model}</span>
+                      <span className="block truncate text-[10px] text-text-muted">
+                        {r.provider || "?"}
+                        {r.connectionName ? ` · ${r.connectionName}` : ""}
+                      </span>
+                    </td>
                     <td className="py-1.5 text-right whitespace-nowrap">
                       <span className="text-primary">{fmt(r.promptTokens)}↑</span>
                       {" "}
@@ -82,6 +93,106 @@ function RecentRequests({ requests = [] }) {
           </table>
         </div>
       )}
+    </Card>
+  );
+}
+
+const ACTION_LABEL = {
+  fallback: "rate limit / quota",
+  capability: "model not supported",
+  "non-fallback": "request error",
+};
+
+function RoutingPanel({ period, periodMap, onDrillDown }) {
+  const router = useRouter();
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/usage/routing?period=${encodeURIComponent(period)}`)
+      .then((res) => res.json())
+      .then((payload) => { if (!cancelled && payload && !payload.error) setData(payload); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [period]);
+
+  const goToDetails = useCallback((params) => {
+    if (onDrillDown) {
+      onDrillDown(params);
+      return;
+    }
+    const query = new URLSearchParams({ tab: "details", period: periodMap?.(period) || "7d", ...params });
+    router.push(`/dashboard/usage?${query.toString()}`, { scroll: false });
+  }, [router, period, periodMap, onDrillDown]);
+
+  if (!data) return null;
+  const providers = data.providers || [];
+  const redirects = data.redirects || {};
+  const combos = data.combos || [];
+  if (providers.length === 0) return null;
+
+  return (
+    <Card className="min-w-0" padding="sm">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="material-symbols-outlined text-[18px] text-text-muted">account_tree</span>
+          <span className="text-xs font-semibold uppercase tracking-wide text-text-muted">Providers &amp; pools</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(redirects.byAction || []).map((entry) => (
+            <Badge key={entry.action} variant={entry.action === "capability" ? "warning" : "error"} size="sm">
+              {ACTION_LABEL[entry.action] || entry.action}: {entry.count}
+            </Badge>
+          ))}
+          {combos.slice(0, 4).map((combo) => (
+            <button
+              key={combo.name}
+              type="button"
+              onClick={() => goToDetails({ model: combo.name })}
+              className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-muted hover:bg-surface-3"
+              title={combo.models.map((m) => `${m.model} ${m.ok}✓/${m.failed}✗`).join("\n")}
+            >
+              combo: {combo.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {providers.slice(0, 6).map((provider) => (
+          <div key={provider.provider} className="rounded-[10px] border border-border-subtle bg-bg p-3">
+            <button
+              type="button"
+              onClick={() => goToDetails({ provider: provider.provider })}
+              className="flex w-full flex-wrap items-center gap-2 text-left"
+            >
+              <span className="font-medium text-text-main">{provider.name}</span>
+              <span className="text-xs text-text-muted">{fmt(provider.requests)} req</span>
+              <span className="text-xs text-text-muted">{fmt(provider.tokens)} tok</span>
+              {provider.failures > 0 && <span className="text-xs text-error">{provider.failures} failed</span>}
+              <span className="text-xs text-text-subtle">{provider.connections.length} account{provider.connections.length > 1 ? "s" : ""}</span>
+              <span className="material-symbols-outlined ml-auto text-[16px] text-text-subtle">chevron_right</span>
+            </button>
+            {provider.connections.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {provider.connections.slice(0, 6).map((conn) => (
+                  <button
+                    key={conn.connectionId || conn.name}
+                    type="button"
+                    onClick={() => conn.connectionId && goToDetails({ provider: provider.provider, connectionId: conn.connectionId })}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-muted hover:bg-surface-3"
+                    title={`last used ${timeAgo(conn.lastUsed)}`}
+                  >
+                    <span className={`size-1.5 rounded-full ${conn.failures > 0 ? "bg-warning" : "bg-success"}`} />
+                    {conn.name}
+                    <span className="text-text-subtle">{fmt(conn.requests)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </Card>
   );
 }
@@ -199,6 +310,10 @@ const PERIODS = [
   { value: "30d", label: "30D" },
   { value: "60d", label: "60D" },
 ];
+
+// Overview periods → Details tab periods
+const DETAIL_PERIOD = { today: "24h", "24h": "24h", "7d": "7d", "30d": "30d", "60d": "all" };
+const toDetailPeriod = (value) => DETAIL_PERIOD[value] || "7d";
 
 export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false } = {}) {
   const router = useRouter();
@@ -435,6 +550,11 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
 
   if (!stats && !loading) return <div className="text-text-muted">Failed to load usage statistics.</div>;
 
+  const drillDown = (params) => {
+    const query = new URLSearchParams({ tab: "details", period: toDetailPeriod(period), ...params });
+    router.push(`/dashboard/usage?${query.toString()}`, { scroll: false });
+  };
+
   const spinner = (
     <div className="flex items-center justify-center py-12 text-text-muted">
       <span className="material-symbols-outlined text-[32px] animate-spin">progress_activity</span>
@@ -475,13 +595,30 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
             activeRequests={stats.activeRequests || []}
             lastProvider={stats.recentRequests?.[0]?.provider || ""}
             errorProvider={stats.errorProvider || ""}
+            period={period}
+            onSelectProvider={(providerId) => providerId && drillDown({ provider: providerId })}
+            onSelectConnection={(connectionId, provider) =>
+              connectionId && drillDown({ connectionId, ...(provider ? { provider } : {}) })}
+            onSelectCombo={(name) => name && drillDown({ model: name })}
+            onSelectModel={(modelStr) => {
+              if (typeof modelStr !== "string" || !modelStr) return;
+              const slash = modelStr.indexOf("/");
+              if (slash > 0) drillDown({ provider: modelStr.slice(0, slash), model: modelStr.slice(slash + 1) });
+              else drillDown({ model: modelStr });
+            }}
           />
-          <RecentRequests requests={stats.recentRequests || []} />
+          <RecentRequests
+            requests={stats.recentRequests || []}
+            onSelect={(row) => drillDown({ model: row.model, ...(row.provider ? { provider: row.provider } : {}) })}
+          />
         </div>
       )}
 
+      {/* Providers, pools, redirects, combos */}
+      {loading ? spinner : <RoutingPanel period={period} periodMap={toDetailPeriod} onDrillDown={drillDown} />}
+
       {/* Token / Cost chart - sync period */}
-      {loading ? spinner : <UsageChart period={period} />}
+      {loading ? spinner : <UsageChart period={period} onSelectPeriod={() => drillDown({})} />}
 
       {/* Table with dropdown selector */}
       <div className="flex flex-col gap-3">

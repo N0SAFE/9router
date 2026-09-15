@@ -110,7 +110,7 @@ async function getConnectionMapCached() {
     const { getProviderConnections } = await import("./connectionsRepo.js");
     const all = await getProviderConnections();
     const map = {};
-    for (const c of all) map[c.id] = c.name || c.email || c.id;
+    for (const c of all) map[c.id] = c.displayName || c.name || c.email || c.id;
     connCache.map = map;
     connCache.ts = Date.now();
   } catch {}
@@ -219,6 +219,8 @@ export async function getActiveRequests() {
       const t = e.tokens || {};
       return {
         timestamp: e.timestamp, model: e.model, provider: e.provider || "",
+        connectionId: e.connectionId || null,
+        connectionName: e.connectionId ? (connectionMap[e.connectionId] || null) : null,
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
         status: e.status || "ok",
@@ -248,6 +250,8 @@ export async function saveRequestUsage(entry) {
     const tokens = entry.tokens || {};
     const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
+    // Optional small metadata (e.g. the one-line routing summary).
+    const meta = entry.meta && typeof entry.meta === "object" ? entry.meta : {};
 
     let inserted = false;
 
@@ -275,6 +279,11 @@ export async function saveRequestUsage(entry) {
         if (!existing.endpoint && entry.endpoint) {
           db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
         }
+        if (Object.keys(meta).length > 0) {
+          const row = db.get(`SELECT meta FROM usageHistory WHERE id = ?`, [existing.id]);
+          const current = parseJson(row?.meta, {});
+          db.run(`UPDATE usageHistory SET meta = ? WHERE id = ?`, [stringifyJson({ ...current, ...meta }), existing.id]);
+        }
         return;
       }
 
@@ -284,7 +293,7 @@ export async function saveRequestUsage(entry) {
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
           promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
-          stringifyJson(tokens), stringifyJson({}),
+          stringifyJson(tokens), stringifyJson(meta),
         ]
       );
 
@@ -320,17 +329,23 @@ export async function getUsageHistory(filter = {}) {
 
   if (filter.provider) { conds.push("provider = ?"); params.push(filter.provider); }
   if (filter.model) { conds.push("model = ?"); params.push(filter.model); }
+  if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
+  if (filter.status) { conds.push("status = ?"); params.push(filter.status); }
   if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
   if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
 
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id ASC`, params);
+  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens, meta FROM usageHistory ${where} ORDER BY id ASC`, params);
 
-  return rows.map((r) => ({
-    timestamp: r.timestamp, provider: r.provider, model: r.model,
-    connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
-    cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
-  }));
+  return rows.map((r) => {
+    const meta = parseJson(r.meta, {});
+    return {
+      timestamp: r.timestamp, provider: r.provider, model: r.model,
+      connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
+      cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
+      routingSummary: typeof meta.routing === "string" ? meta.routing : null,
+    };
+  });
 }
 
 function loadDaysInRange(adapter, maxDays) {
@@ -369,13 +384,15 @@ export async function getUsageStats(period = "all") {
   for (const k of allApiKeys) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
 
   // recentRequests from live history (last 100 entries enough for 20 deduped)
-  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
+  const recentRows = db.all(`SELECT timestamp, provider, model, connectionId, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
   const seen = new Set();
   const recentRequests = recentRows
     .map((r) => {
       const t = parseJson(r.tokens, {}) || {};
       return {
         timestamp: r.timestamp, model: r.model, provider: r.provider || "",
+        connectionId: r.connectionId || null,
+        connectionName: r.connectionId ? (connectionMap[r.connectionId] || null) : null,
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
         cachedTokens: t.cached_tokens || t.cache_read_input_tokens || 0,
@@ -743,7 +760,7 @@ export async function getRecentLogs(limit = 200) {
   try {
     const db = await getAdapter();
     const rows = db.all(
-      `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`,
+      `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status, tokens, meta FROM usageHistory ORDER BY id DESC LIMIT ?`,
       [limit],
     );
     if (!rows.length) return [];
@@ -763,7 +780,9 @@ export async function getRecentLogs(limit = 200) {
       const tk = r.tokens ? parseJson(r.tokens, {}) : {};
       const sent = r.promptTokens ?? tk.prompt_tokens ?? "-";
       const received = r.completionTokens ?? tk.completion_tokens ?? "-";
-      return `${ts} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${r.status || "-"}`;
+      const meta = parseJson(r.meta, {});
+      const routing = typeof meta.routing === "string" ? meta.routing : "";
+      return `${ts} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${r.status || "-"} | ${routing}`;
     });
   } catch (e) {
     console.error("[usageRepo] getRecentLogs failed:", e.message);

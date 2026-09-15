@@ -116,6 +116,8 @@ async function flushToDatabase() {
             providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
             response: truncateField(item.response, config.maxJsonSize),
             pxpipe: item.pxpipe || undefined,
+            // Combo/pool/account decision trace (metadata, already capped).
+            routing: item.routing ? truncateField(item.routing, config.maxJsonSize) : undefined,
           };
 
           db.run(
@@ -146,17 +148,14 @@ export async function saveRequestDetail(detail) {
 
   writeBuffer.push(detail);
 
-  // Trigger immediate flush if batch threshold reached.
-  // flushToDatabase() drains entire buffer in a loop, so all pushes during await are persisted.
-  if (writeBuffer.length >= config.batchSize) {
-    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  // Persist on the next tick instead of waiting for the batch/timer window.
+  // Buffered rows were previously lost whenever the server restarted inside the
+  // flush interval, which silently left gaps in the details view. The
+  // isFlushing guard coalesces concurrent saves into one transaction.
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  queueMicrotask(() => {
     flushToDatabase().catch((e) => console.error("[requestDetailsRepo] flush err:", e));
-  } else if (!flushTimer) {
-    flushTimer = setTimeout(() => {
-      flushTimer = null;
-      flushToDatabase().catch(() => {});
-    }, config.flushIntervalMs);
-  }
+  });
 }
 
 export async function getRequestDetails(filter = {}) {
@@ -190,6 +189,31 @@ export async function getRequestDetails(filter = {}) {
     details,
     pagination: { page, pageSize, totalItems, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
   };
+}
+
+/**
+ * Fetch recent request details in a time range (no pagination) for the insight
+ * engine. Bounded to keep the hot path light.
+ */
+export async function getRequestDetailsInRange(filter = {}, limit = 500) {
+  const db = await getAdapter();
+  const conds = [];
+  const params = [];
+
+  if (filter.provider) { conds.push("provider = ?"); params.push(filter.provider); }
+  if (filter.model) { conds.push("model = ?"); params.push(filter.model); }
+  if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
+  if (filter.status) { conds.push("status = ?"); params.push(filter.status); }
+  if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
+  if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
+
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const capped = Math.max(1, Math.min(Number(limit) || 500, 2000));
+  const rows = db.all(
+    `SELECT data FROM requestDetails ${where} ORDER BY timestamp DESC LIMIT ?`,
+    [...params, capped]
+  );
+  return rows.map((r) => parseJson(r.data, {}));
 }
 
 export async function getDistinctProviders() {

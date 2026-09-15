@@ -1,337 +1,658 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { useSearchParams } from "next/navigation";
 import Card from "@/shared/components/Card";
 import Button from "@/shared/components/Button";
 import Drawer from "@/shared/components/Drawer";
 import Pagination from "@/shared/components/Pagination";
+import Badge from "@/shared/components/Badge";
+import SegmentedControl from "@/shared/components/SegmentedControl";
 import { cn } from "@/shared/utils/cn";
 import { AI_PROVIDERS, getProviderByAlias } from "@/shared/constants/providers";
+import {
+  analyzeRequest,
+  PATTERN_META,
+  getInputTokens,
+  getCachedTokens,
+  getCacheCreationTokens,
+  getOutputTokens,
+} from "@/lib/usage/insights";
+import TokenFlowBar from "./TokenFlowBar";
+import UsageInsights from "./UsageInsights";
+import { fmt, fmtCompact, fmtCost, fmtPct, fmtTime, fmtDateTime, fmtDuration } from "./format";
+
+const PERIODS = [
+  { value: "1h", label: "1h" },
+  { value: "24h", label: "24h" },
+  { value: "7d", label: "7D" },
+  { value: "30d", label: "30D" },
+  { value: "all", label: "All" },
+];
+
+const PERIOD_MS = {
+  "1h": 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+};
+
+function periodStart(period) {
+  if (!period || period === "all") return undefined;
+  const ms = PERIOD_MS[period];
+  return new Date(Date.now() - ms).toISOString();
+}
+
+function wasteVariant(score) {
+  if (score >= 60) return "error";
+  if (score >= 30) return "warning";
+  if (score > 0) return "info";
+  return "success";
+}
 
 let providerNameCache = null;
-let providerNodesCache = null;
 
 async function fetchProviderNames() {
-  if (providerNameCache && providerNodesCache) {
-    return { providerNameCache, providerNodesCache };
-  }
-
+  if (providerNameCache) return providerNameCache;
   const nodesRes = await fetch("/api/provider-nodes");
   const nodesData = await nodesRes.json();
   const nodes = nodesData.nodes || [];
-  providerNodesCache = {};
-
-  for (const node of nodes) {
-    providerNodesCache[node.id] = node.name;
-  }
-
-  providerNameCache = {
-    ...AI_PROVIDERS,
-    ...providerNodesCache
-  };
-
-  return { providerNameCache, providerNodesCache };
+  const nodeNames = {};
+  for (const node of nodes) nodeNames[node.id] = node.name;
+  providerNameCache = { ...AI_PROVIDERS, ...nodeNames };
+  return providerNameCache;
 }
 
 function getProviderName(providerId, cache) {
-  if (!providerId) return providerId;
-  if (!cache) return providerId;
-
-  const cached = cache[providerId];
-
-  if (typeof cached === 'string') {
-    return cached;
-  }
-
-  if (cached?.name) {
-    return cached.name;
-  }
-
+  if (!providerId) return "—";
+  const cached = cache?.[providerId];
+  if (typeof cached === "string") return cached;
+  if (cached?.name) return cached.name;
   const providerConfig = getProviderByAlias(providerId) || AI_PROVIDERS[providerId];
   return providerConfig?.name || providerId;
 }
 
-function CollapsibleSection({ title, children, defaultOpen = false, icon = null }) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
+function StatusPill({ status }) {
+  const ok = !status || status === "success";
   return (
-    <div className="border border-black/5 dark:border-white/5 rounded-lg overflow-hidden">
-      <button 
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between p-3 bg-black/[0.02] dark:bg-white/[0.02] hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          {icon && <span className="material-symbols-outlined text-[18px] text-text-muted">{icon}</span>}
-          <span className="font-semibold text-sm text-text-main">{title}</span>
+    <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", ok ? "text-emerald-600 dark:text-emerald-400" : "text-danger")}>
+      <span className={cn("size-1.5 rounded-full", ok ? "bg-emerald-500" : "bg-danger")} />
+      {ok ? "success" : status}
+    </span>
+  );
+}
+
+function routeLabel(detail) {
+  const routing = detail?.routing;
+  if (routing?.combo?.name) return { kind: "combo", label: routing.combo.name, models: routing.combo.models?.length || 0 };
+  if (routing?.provider || routing?.pool) {
+    const redirects = routing.attempts?.length || 0;
+    return { kind: "pool", label: routing.provider || routing.pool?.provider || "pool", redirects };
+  }
+  if (detail?.routingSummary) return { kind: "summary", label: detail.routingSummary.split(" | ")[0], redirects: 0 };
+  return null;
+}
+
+function actionVariant(action) {
+  if (action === "capability") return "warning";
+  if (action === "fallback") return "error";
+  if (action === "non-fallback") return "default";
+  return "info";
+}
+
+function RoutingTimeline({ detail }) {
+  const routing = detail?.routing;
+  if (!routing) {
+    return detail?.routingSummary ? (
+      <div className="rounded-[10px] border border-border-subtle bg-bg p-3 font-mono text-[11px] text-text-muted">
+        {detail.routingSummary}
+      </div>
+    ) : (
+      <p className="text-xs text-text-muted">
+        No routing trace stored for this request (captured before tracing was enabled, or recovered from usage history).
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Badge variant="default" size="sm">requested</Badge>
+        <span className="font-mono text-text-main">{routing.requestedModel || "—"}</span>
+        <span className="material-symbols-outlined text-[14px] text-text-muted">arrow_forward</span>
+        <Badge variant="primary" size="sm">{routing.provider || "—"}</Badge>
+        <span className="font-mono text-text-main">{routing.model || "—"}</span>
+        {routing.combo && (
+          <Badge variant="info" size="sm">
+            {routing.combo.kind === "capacity" ? "capacity adapter" : "combo"}: {routing.combo.name} · {routing.combo.strategy}
+          </Badge>
+        )}
+      </div>
+
+      {routing.combo?.models?.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {routing.combo.models.map((model) => (
+            <span
+              key={model.model}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px]",
+                model.status === "success"
+                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                  : "bg-surface-2 text-text-muted"
+              )}
+              title={model.error || undefined}
+            >
+              <span className="material-symbols-outlined text-[12px]">{model.status === "success" ? "check" : "close"}</span>
+              {model.model}
+            </span>
+          ))}
         </div>
-        <span className={cn(
-          "material-symbols-outlined text-[20px] text-text-muted transition-transform duration-200",
-          isOpen ? "rotate-90" : ""
-        )}>
-          chevron_right
-        </span>
-      </button>
-      
-      {isOpen && (
-        <div className="p-4 border-t border-black/5 dark:border-white/5">
-          {children}
+      )}
+
+      {routing.selected && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Badge variant="success" size="sm">selected</Badge>
+          <span className="font-mono text-text-main">{routing.selected.name || routing.selected.connectionId || "—"}</span>
+          {routing.selected.reason && <span className="text-text-muted">({routing.selected.reason})</span>}
+        </div>
+      )}
+
+      {routing.attempts?.length > 0 && (
+        <ol className="space-y-1.5">
+          {routing.attempts.map((attempt, index) => (
+            <li key={`${attempt.connectionId || "a"}-${index}`} className="flex flex-wrap items-center gap-2 rounded-[10px] border border-border-subtle bg-bg p-2.5 text-xs">
+              <span className="font-mono text-text-subtle">{index + 1}</span>
+              <span className="font-mono text-text-main">{attempt.name || attempt.connectionId || "account"}</span>
+              <Badge variant={actionVariant(attempt.action)} size="sm">{attempt.action || "failed"}</Badge>
+              <span className="font-mono text-text-muted">status {attempt.status ?? "?"}</span>
+              {attempt.cooldownMs > 0 && (
+                <span className="text-text-muted">cooldown {Math.round(attempt.cooldownMs / 1000)}s</span>
+              )}
+              {attempt.redirectTo && (
+                <span className="inline-flex items-center gap-1 text-warning">
+                  <span className="material-symbols-outlined text-[13px]">alt_route</span>
+                  → {attempt.redirectTo.slice(0, 8)}
+                </span>
+              )}
+              {attempt.error && (
+                <span className="w-full truncate text-[11px] text-text-subtle" title={attempt.error}>{attempt.error}</span>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function InsightHintList({ flags }) {
+  if (!flags || flags.length === 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-[10px] border border-emerald-500/20 bg-emerald-500/5 p-3">
+        <span className="material-symbols-outlined text-[18px] text-emerald-500">verified</span>
+        <p className="text-sm text-text-main">No token leaks detected on this request.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {flags.map((flag) => {
+        const meta = PATTERN_META[flag.id] || { title: flag.id, explanation: "", tip: "" };
+        return (
+          <div key={flag.id} className="rounded-[10px] border border-border-subtle bg-bg p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold text-text-main">{meta.title}</span>
+              {flag.wastedTokens > 0 && (
+                <Badge variant="warning" size="sm">~{fmt(flag.wastedTokens)} tokens</Badge>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-text-muted">{meta.explanation}</p>
+            <div className="mt-2 flex items-start gap-2">
+              <span className="material-symbols-outlined text-[15px] text-brand-500">tips_and_updates</span>
+              <p className="text-xs leading-relaxed text-text-main">{meta.tip}</p>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const ROLE_VARIANT = {
+  user: "info",
+  assistant: "success",
+  system: "default",
+  developer: "primary",
+  tool: "warning",
+  function: "warning",
+};
+
+function ContentDigestView({ digest }) {
+  if (!digest) return null;
+  const tools = digest.tools || [];
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="default" size="sm">{digest.messageCount} messages</Badge>
+        {tools.length > 0 && <Badge variant="default" size="sm">{tools.length} tools</Badge>}
+        {digest.truncated && (
+          <Badge variant="warning" size="sm">
+            truncated{digest.originalBytes ? ` from ${fmtCompact(digest.originalBytes)}B` : ""}
+          </Badge>
+        )}
+      </div>
+
+      {tools.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {tools.slice(0, 16).map((name) => (
+            <span key={name} className="rounded-full bg-surface-2 px-2 py-0.5 font-mono text-[11px] text-text-muted">{name}</span>
+          ))}
+          {tools.length > 16 && <span className="text-[11px] text-text-subtle">+{tools.length - 16} more</span>}
+        </div>
+      )}
+
+      {digest.truncated && digest.truncatedPreview && (
+        <p className="rounded-[10px] bg-bg p-2 font-mono text-[11px] leading-relaxed text-text-muted">{digest.truncatedPreview}</p>
+      )}
+
+      {digest.messages?.length > 0 && (
+        <div className="space-y-1.5">
+          {digest.messages.map((message, index) => (
+            <div key={index} className="rounded-[10px] border border-border-subtle bg-bg p-2.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={ROLE_VARIANT[message.role] || "default"} size="sm">{message.role}</Badge>
+                <span className="text-[11px] text-text-muted">{fmt(message.chars)} chars</span>
+                {message.toolCalls && (
+                  <span className="truncate font-mono text-[11px] text-text-subtle">→ {message.toolCalls.join(", ")}</span>
+                )}
+              </div>
+              {message.preview && (
+                <p className="mt-1.5 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text-main">{message.preview}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {digest.response && (
+        <div className="rounded-[10px] border border-border-subtle bg-bg p-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="success" size="sm">response</Badge>
+            <span className="text-[11px] text-text-muted">
+              {fmt(digest.response.contentChars)} chars{digest.response.finishReason ? ` · ${digest.response.finishReason}` : ""}
+            </span>
+          </div>
+          {digest.response.preview && (
+            <p className="mt-1.5 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-text-main">{digest.response.preview}</p>
+          )}
+          {digest.response.thinkingChars > 0 && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-[11px] text-text-muted">
+                thinking ({fmt(digest.response.thinkingChars)} chars)
+              </summary>
+              <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-text-muted">{digest.response.thinkingPreview}</p>
+            </details>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function getCachedTokens(tokens) {
-  return tokens?.cached_tokens || tokens?.cache_read_input_tokens || 0;
-}
-
-function getCacheCreationTokens(tokens) {
-  return tokens?.cache_creation_input_tokens || 0;
-}
-
-function getInputTokens(tokens) {
-  const prompt = tokens?.prompt_tokens || tokens?.input_tokens || 0;
-  // Canonical storage keeps prompt cache-inclusive. Legacy Claude rows may have
-  // stored prompt cache-exclusive; fall back to cache when it's larger so old
-  // rows don't under-report input.
-  const cache = getCachedTokens(tokens);
-  return prompt < cache ? cache : prompt;
+function CollapsibleSection({ title, children, defaultOpen = false, icon = null }) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  return (
+    <div className="overflow-hidden rounded-[10px] border border-border-subtle">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex w-full items-center justify-between bg-bg p-3 transition-colors hover:bg-surface-2/60"
+      >
+        <div className="flex items-center gap-2">
+          {icon && <span className="material-symbols-outlined text-[18px] text-text-muted">{icon}</span>}
+          <span className="text-sm font-semibold text-text-main">{title}</span>
+        </div>
+        <span className={cn("material-symbols-outlined text-[20px] text-text-muted transition-transform duration-200", isOpen && "rotate-90")}>
+          chevron_right
+        </span>
+      </button>
+      {isOpen && <div className="border-t border-border-subtle p-4">{children}</div>}
+    </div>
+  );
 }
 
 export default function RequestDetailsTab() {
-  const [details, setDetails] = useState([]);
-  const [pagination, setPagination] = useState({
-    page: 1,
-    pageSize: 20,
-    totalItems: 0,
-    totalPages: 0
+  const searchParams = useSearchParams();
+  const [period, setPeriod] = useState(() => {
+    const urlPeriod = searchParams.get("period");
+    return PERIODS.some((p) => p.value === urlPeriod) ? urlPeriod : "7d";
   });
-  const [loading, setLoading] = useState(false);
-  const [selectedDetail, setSelectedDetail] = useState(null);
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [providerFilter, setProviderFilter] = useState(() => searchParams.get("provider") || "");
+  const [modelFilter, setModelFilter] = useState(() => searchParams.get("model") || "");
+  const [connectionFilter, setConnectionFilter] = useState(() => searchParams.get("connectionId") || "");
+  const [details, setDetails] = useState([]);
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 20, totalItems: 0, totalPages: 0 });
+  const [detailsLoading, setDetailsLoading] = useState(true);
+  const [insights, setInsights] = useState(null);
+  const [insightsLoading, setInsightsLoading] = useState(true);
   const [providers, setProviders] = useState([]);
   const [providerNameCache, setProviderNameCache] = useState(null);
-  const [filters, setFilters] = useState({
-    provider: "",
-    startDate: "",
-    endDate: ""
-  });
+  const [selectedDetail, setSelectedDetail] = useState(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const fetchProviders = useCallback(async () => {
-    try {
-      const res = await fetch("/api/usage/providers");
-      const data = await res.json();
-      setProviders(data.providers || []);
-
-      const cache = await fetchProviderNames();
-      setProviderNameCache(cache.providerNameCache);
-    } catch (error) {
-      console.error("Failed to fetch providers:", error);
-    }
+  const startDate = useMemo(() => periodStart(period), [period]);
+  const providerName = useCallback((id) => getProviderName(id, providerNameCache), [providerNameCache]);
+  const connectionName = useCallback((row) => {
+    if (!row?.connectionId) return "—";
+    return row.connectionName || row.connectionId.slice(0, 8);
   }, []);
 
-  const fetchDetails = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        page: pagination.page.toString(),
-        pageSize: pagination.pageSize.toString()
-      });
-      if (filters.provider) params.append("provider", filters.provider);
-      if (filters.startDate) params.append("startDate", filters.startDate);
-      if (filters.endDate) params.append("endDate", filters.endDate);
-
-      const res = await fetch(`/api/usage/request-details?${params}`);
-      const data = await res.json();
-
-      setDetails(data.details || []);
-      setPagination(prev => ({ ...prev, ...data.pagination }));
-    } catch (error) {
-      console.error("Failed to fetch request details:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [pagination.page, pagination.pageSize, filters]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/usage/providers")
+      .then((res) => res.json())
+      .then((data) => { if (!cancelled) setProviders(data.providers || []); })
+      .catch((error) => console.error("Failed to fetch providers:", error));
+    fetchProviderNames()
+      .then((cache) => { if (!cancelled) setProviderNameCache(cache); })
+      .catch((error) => console.error("Failed to fetch provider names:", error));
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
-    fetchProviders();
-  }, [fetchProviders]);
+    let cancelled = false;
+    const params = new URLSearchParams({ period });
+    if (providerFilter) params.append("provider", providerFilter);
+    if (modelFilter) params.append("model", modelFilter);
+    if (connectionFilter) params.append("connectionId", connectionFilter);
+    fetch(`/api/usage/insights?${params}`)
+      .then((res) => res.json())
+      .then((data) => { if (!cancelled && data && !data.error) setInsights(data); })
+      .catch((error) => console.error("Failed to fetch usage insights:", error))
+      .finally(() => { if (!cancelled) setInsightsLoading(false); });
+    return () => { cancelled = true; };
+  }, [period, providerFilter, modelFilter, connectionFilter, refreshKey]);
 
   useEffect(() => {
-    fetchDetails();
-  }, [fetchDetails]);
+    let cancelled = false;
+    const params = new URLSearchParams({
+      page: String(pagination.page),
+      pageSize: String(pagination.pageSize),
+    });
+    if (providerFilter) params.append("provider", providerFilter);
+    if (modelFilter) params.append("model", modelFilter);
+    if (connectionFilter) params.append("connectionId", connectionFilter);
+    if (startDate) params.append("startDate", startDate);
+    fetch(`/api/usage/request-details?${params}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled) return;
+        setDetails(data.details || []);
+        setPagination((prev) => ({ ...prev, ...data.pagination }));
+      })
+      .catch((error) => console.error("Failed to fetch request details:", error))
+      .finally(() => { if (!cancelled) setDetailsLoading(false); });
+    return () => { cancelled = true; };
+  }, [pagination.page, pagination.pageSize, providerFilter, modelFilter, connectionFilter, startDate, refreshKey]);
 
-  const handleViewDetail = (detail) => {
-    setSelectedDetail(detail);
-    setIsDrawerOpen(true);
+  const handleRefresh = () => {
+    setRefreshing(true);
+    setInsightsLoading(true);
+    setDetailsLoading(true);
+    setRefreshKey((k) => k + 1);
+    setTimeout(() => setRefreshing(false), 800);
+  };
+
+  const handlePeriodChange = (value) => {
+    setPeriod(value);
+    setInsightsLoading(true);
+    setDetailsLoading(true);
+    setPagination((prev) => ({ ...prev, page: 1 }));
+  };
+
+  const handleProviderChange = (value) => {
+    setProviderFilter(value);
+    setInsightsLoading(true);
+    setDetailsLoading(true);
+    setPagination((prev) => ({ ...prev, page: 1 }));
+  };
+
+  const handleModelChange = (value) => {
+    setModelFilter(value || "");
+    setDetailsLoading(true);
+    setPagination((prev) => ({ ...prev, page: 1 }));
+  };
+
+  const handleConnectionChange = (value) => {
+    setConnectionFilter(value || "");
+    setDetailsLoading(true);
+    setPagination((prev) => ({ ...prev, page: 1 }));
   };
 
   const handlePageChange = (newPage) => {
-    setPagination(prev => ({ ...prev, page: newPage }));
+    setDetailsLoading(true);
+    setPagination((prev) => ({ ...prev, page: newPage }));
   };
 
   const handlePageSizeChange = (newPageSize) => {
-    setPagination(prev => ({ ...prev, pageSize: newPageSize, page: 1 }));
+    setDetailsLoading(true);
+    setPagination((prev) => ({ ...prev, pageSize: newPageSize, page: 1 }));
   };
 
-  const handleClearFilters = () => {
-    setFilters({ provider: "", startDate: "", endDate: "" });
+  const openDetail = (detail) => {
+    setSelectedDetail(detail);
+    setDrawerOpen(true);
   };
+
+  const selectedAnalysis = useMemo(
+    () => (selectedDetail ? analyzeRequest(selectedDetail, { costEstimator: (r) => r.cost }) : null),
+    [selectedDetail]
+  );
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
-      <Card padding="md">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="flex min-w-0 flex-col gap-2">
-            <label htmlFor="provider-filter" className="text-sm font-medium text-text-main">Provider</label>
-            <select
-              id="provider-filter"
-              value={filters.provider}
-              onChange={(e) => setFilters({ ...filters, provider: e.target.value })}
-              className={cn(
-                "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
-                "text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20",
-                "w-full min-w-0 cursor-pointer"
-              )}
-              style={{ colorScheme: 'auto' }}
-            >
-              <option value="">All Providers</option>
-              {providers.map((provider) => (
-                <option key={provider.id} value={provider.id}>
-                  {provider.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          
-          <div className="flex min-w-0 flex-col gap-2">
-            <label htmlFor="start-date-filter" className="text-sm font-medium text-text-main">Start Date</label>
-            <input
-              id="start-date-filter"
-              type="datetime-local"
-              value={filters.startDate}
-              onChange={(e) => setFilters({ ...filters, startDate: e.target.value })}
-              className={cn(
-                "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
-                "w-full min-w-0 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20"
-              )}
-            />
-          </div>
-
-          <div className="flex min-w-0 flex-col gap-2">
-            <label htmlFor="end-date-filter" className="text-sm font-medium text-text-main">End Date</label>
-            <input
-              id="end-date-filter"
-              type="datetime-local"
-              value={filters.endDate}
-              onChange={(e) => setFilters({ ...filters, endDate: e.target.value })}
-              className={cn(
-                "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
-                "w-full min-w-0 text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20"
-              )}
-            />
-          </div>
-          
-          <div className="flex min-w-0 flex-col gap-2 sm:col-span-2 lg:col-span-1">
-            <span className="hidden text-sm font-medium text-text-main opacity-0 lg:block" aria-hidden="true">Clear</span>
-            <Button 
-              variant="ghost" 
-              onClick={handleClearFilters}
-              disabled={!filters.provider && !filters.startDate && !filters.endDate}
-              className="w-full"
-            >
-              Clear Filters
+      {/* Filters */}
+      <Card padding="sm">
+        <div className="flex flex-wrap items-center gap-3">
+          <SegmentedControl options={PERIODS} value={period} onChange={handlePeriodChange} size="sm" />
+          <select
+            id="provider-filter"
+            value={providerFilter}
+            onChange={(e) => handleProviderChange(e.target.value)}
+            className={cn(
+              "h-9 min-w-0 cursor-pointer rounded-lg border border-border bg-surface px-3 text-sm text-text-main",
+              "focus:outline-none focus:ring-2 focus:ring-primary/20"
+            )}
+            style={{ colorScheme: "auto" }}
+          >
+            <option value="">All providers</option>
+            {providers.map((provider) => (
+              <option key={provider.id} value={provider.id}>{provider.name}</option>
+            ))}
+          </select>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-text-muted">
+              {insights?.sampled ? `${fmt(insights.sampled)} sampled requests` : ""}
+            </span>
+            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing}>
+              <span className={cn("material-symbols-outlined text-[16px]", refreshing && "animate-spin")}>refresh</span>
+              Refresh
             </Button>
           </div>
         </div>
+        {(modelFilter || connectionFilter) && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border-subtle pt-3">
+            <span className="text-xs text-text-muted">Filtered by</span>
+            {modelFilter && (
+              <button
+                type="button"
+                onClick={() => handleModelChange("")}
+                className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2.5 py-1 text-xs text-text-main hover:bg-surface-3"
+              >
+                <span className="font-mono">{modelFilter}</span>
+                <span className="material-symbols-outlined text-[14px]">close</span>
+              </button>
+            )}
+            {connectionFilter && (
+              <button
+                type="button"
+                onClick={() => handleConnectionChange("")}
+                className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2.5 py-1 text-xs text-text-main hover:bg-surface-3"
+              >
+                <span className="material-symbols-outlined text-[14px]">account_circle</span>
+                <span className="font-mono">{connectionFilter.slice(0, 8)}</span>
+                <span className="material-symbols-outlined text-[14px]">close</span>
+              </button>
+            )}
+          </div>
+        )}
       </Card>
 
-      <Card padding="none">
+      {/* Insights */}
+      <UsageInsights
+        insights={insights}
+        loading={insightsLoading}
+        providerName={providerName}
+        onSelectOffender={openDetail}
+      />
+
+      {/* Requests table */}
+      <Card padding="none" className="min-w-0 overflow-hidden">
+        <div className="flex items-center justify-between gap-3 border-b border-border-subtle p-4">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[20px] text-text-muted">receipt_long</span>
+            <h3 className="font-semibold text-text-main">Requests</h3>
+          </div>
+          <span className="text-xs text-text-muted">click a row for the full breakdown</span>
+        </div>
+
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[880px]">
+          <table className="w-full min-w-[920px]">
             <thead>
-              <tr className="border-b border-black/5 dark:border-white/5">
-                <th className="text-left p-4 text-sm font-semibold text-text-main">Timestamp</th>
-                <th className="text-left p-4 text-sm font-semibold text-text-main">Model</th>
-                <th className="text-left p-4 text-sm font-semibold text-text-main">Provider</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Input Tokens</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Cached</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Cache Creation</th>
-                <th className="text-right p-4 text-sm font-semibold text-text-main">Output Tokens</th>
-                <th className="text-left p-4 text-sm font-semibold text-text-main">Latency</th>
-                <th className="text-center p-4 text-sm font-semibold text-text-main">Action</th>
+              <tr className="border-b border-border-subtle bg-bg/60 text-left text-[11px] uppercase tracking-wide text-text-muted">
+                <th className="p-4 font-semibold">Time</th>
+                <th className="p-4 font-semibold">Model</th>
+                <th className="p-4 font-semibold">Connection</th>
+                <th className="p-4 font-semibold">Route</th>
+                <th className="p-4 font-semibold">Token flow</th>
+                <th className="p-4 text-right font-semibold">Tokens</th>
+                <th className="p-4 text-right font-semibold">Cost</th>
+                <th className="p-4 font-semibold">Latency</th>
+                <th className="p-4 text-center font-semibold">Waste</th>
+                <th className="p-4 font-semibold">Status</th>
               </tr>
             </thead>
-            <tbody>
-              {loading ? (
+            <tbody className="divide-y divide-border-subtle">
+              {detailsLoading ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
-                    <div className="flex items-center justify-center gap-2">
-                      <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
-                      Loading...
-                    </div>
+                  <td colSpan={10} className="p-10 text-center text-text-muted">
+                    <span className="material-symbols-outlined animate-spin text-[20px] align-middle">progress_activity</span>
+                    <span className="ml-2 align-middle">Loading requests…</span>
                   </td>
                 </tr>
               ) : details.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
-                    No request details found
+                  <td colSpan={10} className="p-10 text-center text-text-muted">
+                    No requests in this window.
                   </td>
                 </tr>
               ) : (
-                details.map((detail, index) => (
-                  <tr
-                    key={`${detail.id}-${index}`}
-                    className="border-b border-black/5 dark:border-white/5 last:border-b-0 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
-                  >
-                    <td className="whitespace-nowrap p-4 text-sm text-text-main">
-                      {new Date(detail.timestamp).toLocaleString()}
-                    </td>
-                    <td className="max-w-[260px] truncate p-4 font-mono text-sm text-text-main">
-                      {detail.model}
-                    </td>
-                    <td className="max-w-[180px] truncate p-4 text-sm text-text-main">
-                       <span className="font-medium">
-                         {getProviderName(detail.provider, providerNameCache)}
-                       </span>
-                     </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getInputTokens(detail.tokens).toLocaleString()}
-                    </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getCachedTokens(detail.tokens) > 0 ? getCachedTokens(detail.tokens).toLocaleString() : "—"}
-                    </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {getCacheCreationTokens(detail.tokens) > 0 ? getCacheCreationTokens(detail.tokens).toLocaleString() : "—"}
-                    </td>
-                    <td className="p-4 text-sm text-text-main text-right font-mono">
-                      {detail.tokens?.completion_tokens?.toLocaleString() || 0}
-                    </td>
-                    <td className="p-4 text-sm text-text-muted">
-                      <div className="flex flex-col gap-0.5">
-                        <div>TTFT: <span className="font-mono">{detail.latency?.ttft || 0}ms</span></div>
-                        <div>Total: <span className="font-mono">{detail.latency?.total || 0}ms</span></div>
-                      </div>
-                    </td>
-                    <td className="p-4 text-center">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleViewDetail(detail)}
-                      >
-                        Detail
-                      </Button>
-                    </td>
-                  </tr>
-                ))
+                details.map((detail, index) => {
+                  const analysis = analyzeRequest(detail, { costEstimator: (r) => r.cost });
+                  const input = getInputTokens(detail.tokens);
+                  const cached = getCachedTokens(detail.tokens);
+                  const output = getOutputTokens(detail.tokens);
+                  return (
+                    <tr
+                      key={`${detail.id}-${index}`}
+                      onClick={() => openDetail(detail)}
+                      className="group cursor-pointer transition-colors hover:bg-surface-2/50"
+                    >
+                      <td className="whitespace-nowrap p-4 text-sm text-text-muted">{fmtTime(detail.timestamp)}</td>
+                      <td className="max-w-[240px] p-4">
+                        <p className="truncate font-mono text-sm text-text-main">{detail.model || "unknown"}</p>
+                        <p className="flex items-center gap-1.5 truncate text-xs text-text-muted">
+                          {providerName(detail.provider)}
+                          {detail.source === "history" && (
+                            <span className="rounded bg-surface-2 px-1 text-[10px] uppercase tracking-wide text-text-subtle">history</span>
+                          )}
+                        </p>
+                      </td>
+                      <td className="max-w-[180px] p-4">
+                        {detail.connectionId ? (
+                          <button
+                            type="button"
+                            onClick={(event) => { event.stopPropagation(); handleConnectionChange(detail.connectionId); }}
+                            className="flex max-w-full items-center gap-1.5 truncate rounded-full bg-surface-2 px-2 py-0.5 text-xs text-text-main hover:bg-surface-3"
+                            title={detail.connectionName || detail.connectionId}
+                          >
+                            <span className="material-symbols-outlined text-[14px] text-text-muted">account_circle</span>
+                            <span className="truncate">{connectionName(detail)}</span>
+                          </button>
+                        ) : (
+                          <span className="text-xs text-text-subtle">—</span>
+                        )}
+                      </td>
+                      <td className="max-w-[190px] p-4">
+                        {(() => {
+                          const route = routeLabel(detail);
+                          if (!route) return <span className="text-xs text-text-subtle">—</span>;
+                          return (
+                            <div className="flex min-w-0 flex-col gap-0.5">
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <Badge variant={route.kind === "combo" ? "primary" : route.kind === "pool" ? "info" : "default"} size="sm">
+                                  {route.kind === "combo" ? "combo" : route.kind === "pool" ? "pool" : "route"}
+                                </Badge>
+                                <span className="truncate font-mono text-[11px] text-text-muted">{route.label}</span>
+                              </span>
+                              {route.redirects > 0 && (
+                                <span className="flex items-center gap-1 text-[11px] text-warning">
+                                  <span className="material-symbols-outlined text-[13px]">alt_route</span>
+                                  {route.redirects} redirect{route.redirects > 1 ? "s" : ""}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </td>
+                      <td className="min-w-[180px] p-4">
+                        <TokenFlowBar input={input} cached={cached} output={output} potential={analysis.wastedTokens} height="h-1.5" />
+                      </td>
+                      <td className="p-4 text-right font-mono text-sm text-text-main tabular-nums">
+                        {fmtCompact(analysis.total)}
+                        {cached > 0 && <span className="block text-[11px] text-emerald-600 dark:text-emerald-400">{fmtPct(input > 0 ? cached / input : 0)} cached</span>}
+                      </td>
+                      <td className="p-4 text-right font-mono text-sm text-text-main tabular-nums">{fmtCost(detail.cost)}</td>
+                      <td className="whitespace-nowrap p-4 text-xs text-text-muted">
+                        {detail.latency?.total ? (
+                          <>
+                            <span className="font-mono tabular-nums">{fmtDuration(detail.latency?.ttft)}</span> TTFT
+                            <span className="block font-mono tabular-nums">{fmtDuration(detail.latency?.total)} total</span>
+                          </>
+                        ) : (
+                          <span className="text-text-subtle">—</span>
+                        )}
+                      </td>
+                      <td className="p-4 text-center">
+                        {analysis.wastedTokens > 0 ? (
+                          <Badge variant={wasteVariant(analysis.wasteScore)} size="sm">{analysis.wasteScore}%</Badge>
+                        ) : (
+                          <span className="text-xs text-text-subtle">—</span>
+                        )}
+                      </td>
+                      <td className="p-4"><StatusPill status={detail.status} /></td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
 
-        {!loading && details.length > 0 && (
-          <div className="border-t border-black/5 dark:border-white/5">
+        {!detailsLoading && details.length > 0 && (
+          <div className="border-t border-border-subtle">
             <Pagination
               currentPage={pagination.page}
               pageSize={pagination.pageSize}
@@ -343,162 +664,115 @@ export default function RequestDetailsTab() {
         )}
       </Card>
 
-      <Drawer
-        isOpen={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
-        title="Request Details"
-        width="lg"
-      >
-        {selectedDetail && (
-          <div className="space-y-6">
-            <div className="grid min-w-0 grid-cols-1 gap-4 text-sm sm:grid-cols-2">
-              <div>
-                <span className="text-text-muted">ID:</span>{" "}
-                <span className="break-all font-mono text-text-main">{selectedDetail.id}</span>
+      {/* Detail drawer */}
+      <Drawer isOpen={drawerOpen} onClose={() => setDrawerOpen(false)} title="Request breakdown" width="lg">
+        {selectedDetail && selectedAnalysis && (
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-sm text-text-main">{selectedDetail.model || "unknown"}</span>
+              <Badge variant="default" size="sm">{providerName(selectedDetail.provider)}</Badge>
+              <StatusPill status={selectedDetail.status} />
+              <span className="ml-auto text-xs text-text-muted">{fmtDateTime(selectedDetail.timestamp)}</span>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-text-muted">route</span>
+                <h4 className="text-sm font-semibold text-text-main">Routing</h4>
               </div>
-              <div>
-                <span className="text-text-muted">Timestamp:</span>{" "}
-                <span className="text-text-main">{new Date(selectedDetail.timestamp).toLocaleString()}</span>
-              </div>
-              <div>
-                 <span className="text-text-muted">Provider:</span>{" "}
-                 <span className="text-text-main font-medium">{getProviderName(selectedDetail.provider, providerNameCache)}</span>
-               </div>
-              <div>
-                <span className="text-text-muted">Model:</span>{" "}
-                <span className="text-text-main font-mono">{selectedDetail.model}</span>
-              </div>
-              <div>
-                <span className="text-text-muted">Status:</span>{" "}
-                <span className={cn(
-                  "font-medium",
-                  selectedDetail.status === "success" ? "text-green-600" : "text-red-600"
-                )}>
-                  {selectedDetail.status}
-                </span>
-              </div>
-              <div>
-                <span className="text-text-muted">Latency:</span>{" "}
-                <span className="text-text-main font-mono">
-                  TTFT {selectedDetail.latency?.ttft || 0}ms / Total {selectedDetail.latency?.total || 0}ms
-                </span>
-              </div>
-              <div>
-                <span className="text-text-muted">Input Tokens:</span>{" "}
-                <span className="text-text-main font-mono">
-                  {getInputTokens(selectedDetail.tokens).toLocaleString()}
-                </span>
-              </div>
-              {getCachedTokens(selectedDetail.tokens) > 0 && (
-                <div>
-                  <span className="text-text-muted">Cached Tokens:</span>{" "}
-                  <span className="text-text-main font-mono">
-                    {getCachedTokens(selectedDetail.tokens).toLocaleString()}
-                  </span>
+              <RoutingTimeline detail={selectedDetail} />
+            </div>
+
+            <TokenFlowBar
+              input={selectedAnalysis.input}
+              cached={selectedAnalysis.cached}
+              output={selectedAnalysis.output}
+              potential={selectedAnalysis.wastedTokens}
+              height="h-3"
+              showLegend
+            />
+
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {[
+                { label: "Input", value: fmt(selectedAnalysis.input) },
+                { label: "Cached", value: fmt(selectedAnalysis.cached), sub: fmtPct(selectedAnalysis.input > 0 ? selectedAnalysis.cached / selectedAnalysis.input : 0) },
+                { label: "Cache write", value: fmt(getCacheCreationTokens(selectedDetail.tokens)) },
+                { label: "Output", value: fmt(selectedAnalysis.output) },
+                { label: "Reasoning", value: fmt(selectedAnalysis.reasoning) },
+                { label: "Total", value: fmt(selectedAnalysis.total) },
+                { label: "Est. cost", value: fmtCost(selectedDetail.cost), accent: "text-warning" },
+                {
+                  label: "Latency",
+                  value: selectedDetail.latency?.total
+                    ? `${fmtDuration(selectedDetail.latency?.ttft)} / ${fmtDuration(selectedDetail.latency?.total)}`
+                    : "—",
+                },
+              ].map((item) => (
+                <div key={item.label} className="rounded-[10px] border border-border-subtle bg-bg p-3">
+                  <p className="text-[11px] uppercase tracking-wide text-text-muted">{item.label}</p>
+                  <p className={cn("mt-1 font-mono text-sm font-semibold tabular-nums", item.accent || "text-text-main")}>{item.value}</p>
+                  {item.sub && <p className="text-[11px] text-text-muted">{item.sub}</p>}
                 </div>
-              )}
-              {getCacheCreationTokens(selectedDetail.tokens) > 0 && (
-                <div>
-                  <span className="text-text-muted">Cache Creation:</span>{" "}
-                  <span className="text-text-main font-mono">
-                    {getCacheCreationTokens(selectedDetail.tokens).toLocaleString()}
-                  </span>
-                </div>
-              )}
-              <div>
-                <span className="text-text-muted">Output Tokens:</span>{" "}
-                <span className="text-text-main font-mono">
-                  {selectedDetail.tokens?.completion_tokens?.toLocaleString() || 0}
-                </span>
+              ))}
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-text-muted">lightbulb</span>
+                <h4 className="text-sm font-semibold text-text-main">How to spend less on this request</h4>
+                {selectedAnalysis.wastedTokens > 0 && (
+                  <Badge variant={wasteVariant(selectedAnalysis.wasteScore)} size="sm">
+                    ~{fmt(selectedAnalysis.wastedTokens)} avoidable
+                  </Badge>
+                )}
               </div>
+              <InsightHintList flags={selectedAnalysis.flags} />
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-text-muted">compress</span>
+                <h4 className="text-sm font-semibold text-text-main">Request content (compressed)</h4>
+              </div>
+              {selectedDetail.contentDigest ? (
+                <ContentDigestView digest={selectedDetail.contentDigest} />
+              ) : (
+                <p className="text-xs text-text-muted">
+                  No content preview stored for this request
+                  {selectedDetail.source === "history" ? " — it was recovered from usage history, which only keeps token counts." : "."}
+                </p>
+              )}
             </div>
 
             {selectedDetail.pxpipe && (
-              <div className="rounded-lg border border-black/5 dark:border-white/5 p-4">
-                <div className="flex items-center gap-2 mb-2">
+              <div className="rounded-[10px] border border-border-subtle p-4">
+                <div className="mb-2 flex items-center gap-2">
                   <span className="material-symbols-outlined text-[18px] text-text-muted">image</span>
-                  <span className="font-semibold text-sm text-text-main">PXPIPE</span>
-                  <span className={cn(
-                    "text-xs px-2 py-0.5 rounded",
-                    selectedDetail.pxpipe.applied
-                      ? "bg-green-500/15 text-green-600"
-                      : "bg-amber-500/15 text-amber-600"
-                  )}>
+                  <span className="text-sm font-semibold text-text-main">PXPIPE</span>
+                  <Badge variant={selectedDetail.pxpipe.applied ? "success" : "warning"} size="sm">
                     {selectedDetail.pxpipe.applied ? "Activated" : "Skipped"}
-                  </span>
+                  </Badge>
                 </div>
                 {selectedDetail.pxpipe.applied ? (
                   <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
-                    <div>
-                      <span className="text-text-muted block text-xs">Original (est.)</span>
-                      <span className="font-mono">{(selectedDetail.pxpipe.tokensBeforeEst || 0).toLocaleString()} tokens</span>
-                    </div>
-                    <div>
-                      <span className="text-text-muted block text-xs">Compressed (est.)</span>
-                      <span className="font-mono">{(selectedDetail.pxpipe.tokensAfterEst || 0).toLocaleString()} tokens</span>
-                    </div>
-                    <div>
-                      <span className="text-text-muted block text-xs">Saved</span>
-                      <span className="font-mono text-green-600">{selectedDetail.pxpipe.savedPct || 0}%</span>
-                    </div>
-                    <div>
-                      <span className="text-text-muted block text-xs">Images</span>
-                      <span className="font-mono">{selectedDetail.pxpipe.imageCount || 0} ({selectedDetail.pxpipe.durationMs || 0}ms)</span>
-                    </div>
+                    <div><span className="block text-xs text-text-muted">Before (est.)</span><span className="font-mono">{(selectedDetail.pxpipe.tokensBeforeEst || 0).toLocaleString()}</span></div>
+                    <div><span className="block text-xs text-text-muted">After (est.)</span><span className="font-mono">{(selectedDetail.pxpipe.tokensAfterEst || 0).toLocaleString()}</span></div>
+                    <div><span className="block text-xs text-text-muted">Saved</span><span className="font-mono text-emerald-600">{selectedDetail.pxpipe.savedPct || 0}%</span></div>
+                    <div><span className="block text-xs text-text-muted">Images</span><span className="font-mono">{selectedDetail.pxpipe.imageCount || 0} ({selectedDetail.pxpipe.durationMs || 0}ms)</span></div>
                   </div>
                 ) : (
-                  <p className="text-sm text-text-muted">
-                    Reason: <span className="font-mono">{selectedDetail.pxpipe.reason}</span>
-                    {selectedDetail.pxpipe.detail ? ` — ${selectedDetail.pxpipe.detail}` : ""}
-                  </p>
+                  <p className="text-sm text-text-muted">Reason: <span className="font-mono">{selectedDetail.pxpipe.reason}</span></p>
                 )}
               </div>
             )}
 
-            <div className="space-y-4">
-              <CollapsibleSection title="1. Client Request (Input)" defaultOpen={true} icon="input">
-                <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                  {JSON.stringify(selectedDetail.request, null, 2)}
-                </pre>
-              </CollapsibleSection>
-
-              {selectedDetail.providerRequest && (
-                <CollapsibleSection title="2. Provider Request (Translated)" icon="translate">
-                  <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                    {JSON.stringify(selectedDetail.providerRequest, null, 2)}
-                  </pre>
-                </CollapsibleSection>
-              )}
-
-              {selectedDetail.providerResponse && (
-                <CollapsibleSection title="3. Provider Response (Raw)" icon="data_object">
-                  <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                    {typeof selectedDetail.providerResponse === 'object'
-                      ? JSON.stringify(selectedDetail.providerResponse, null, 2)
-                      : selectedDetail.providerResponse
-                    }
-                  </pre>
-                </CollapsibleSection>
-              )}
-              
-              <CollapsibleSection title="4. Client Response (Final)" defaultOpen={true} icon="output">
-                {selectedDetail.response?.thinking && (
-                  <div className="mb-4">
-                    <h4 className="font-semibold text-text-main mb-2 flex items-center gap-2 text-xs uppercase tracking-wide opacity-70">
-                      <span className="material-symbols-outlined text-[16px]">psychology</span>
-                      Thinking Process
-                    </h4>
-                    <pre className="max-h-[200px] max-w-full overflow-auto rounded-lg border border-amber-200 bg-amber-50 p-3 font-mono text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100 sm:p-4">
-                      {selectedDetail.response.thinking}
-                    </pre>
-                  </div>
-                )}
-                
-                <h4 className="font-semibold text-text-main mb-2 text-xs uppercase tracking-wide opacity-70">
-                  Content
-                </h4>
-                <pre className="max-h-[300px] max-w-full overflow-auto rounded-lg border border-black/5 bg-black/5 p-3 font-mono text-xs text-text-main dark:border-white/5 dark:bg-white/5 sm:p-4">
-                  {selectedDetail.response?.content || "[No content]"}
+            <div className="space-y-3">
+              <p className="text-xs text-text-muted">
+                Payload bodies are hidden by the API for privacy; token, latency and cost metadata is shown above.
+              </p>
+              <CollapsibleSection title="Raw record" icon="data_object">
+                <pre className="max-h-[320px] overflow-auto rounded-[10px] bg-bg p-3 font-mono text-xs text-text-main">
+                  {JSON.stringify(selectedDetail, null, 2)}
                 </pre>
               </CollapsibleSection>
             </div>

@@ -56,7 +56,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
       return {
         id: "noauth",
+        connectionId: "noauth",
         connectionName: "Public",
+        selectionReason: "public",
         isActive: true,
         accessToken: "public",
         providerSpecificData: {
@@ -123,6 +125,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
         return {
           allRateLimited: true,
+          selectionReason: "all-rate-limited",
           retryAfter: earliest,
           retryAfterHuman: formatRetryAfter(earliest),
           lastError: earliestConn?.lastError || null,
@@ -138,11 +141,15 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
 
+    // Human-readable reason for the account pick — surfaced in the routing trace.
+    let selectionReason = null;
+
     let connection;
     // Pin to preferred connection if specified and available
     if (preferredConnectionId) {
       connection = availableConnections.find((c) => c.id === preferredConnectionId);
       if (connection) {
+        selectionReason = "pinned";
         log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
       }
     }
@@ -165,6 +172,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       if (current && current.lastUsedAt && currentCount < stickyLimit) {
         // Stay with current account
         connection = current;
+        selectionReason = "round-robin-sticky";
         // Update lastUsedAt and increment count (await to ensure persistence)
         await updateProviderConnection(connection.id, {
           lastUsedAt: new Date().toISOString(),
@@ -180,6 +188,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         });
 
         connection = sortedByOldest[0];
+        selectionReason = "round-robin";
 
         // Update lastUsedAt and reset count to 1 (await to ensure persistence)
         await updateProviderConnection(connection.id, {
@@ -190,6 +199,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
       connection = availableConnections[0];
+      selectionReason = availableConnections.length === 1 ? "only-account" : "fill-first";
     }
 
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
@@ -215,6 +225,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
       },
       connectionId: connection.id,
+      // Why this account was picked (fill-first / round-robin / pinned / ...)
+      selectionReason,
       // Include current status for optimization check
       testStatus: connection.testStatus,
       lastError: connection.lastError,
