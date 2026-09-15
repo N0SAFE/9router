@@ -287,6 +287,30 @@ chat requests (`headroomUrl` points at a local proxy):
   credential before the Headroom hop. When using pipeline mode, keep Headroom's retries
   disabled (`--retry-max-attempts 1`) so 429s reach the account pool immediately.
 
+## Bridge Discovery API
+
+A bridge/plugin (e.g. a VS Code chat provider) only needs a base URL and an API
+key; account selection stays server-side. To render provider/combos/pools
+pickers, these read-only, secret-free endpoints are available under `/v1`
+(same CORS/no-store behavior as `/v1/models`):
+
+- `GET /v1/providers` — providers that currently have at least one active
+  connection, each with its routable models grouped underneath. `?kind=` accepts
+  any of `llm,image,tts,stt,embedding,imageToText,video,webSearch,webFetch`
+  (default `llm`). Providers with no active account never appear, so a model in
+  this list is always routable.
+- `GET /v1/combos` — configured combos with their models; every model carries
+  `available: true|false` based on whether its provider has an active connection.
+- `GET /v1/pools` — per-provider account pool health as counts only
+  (`connections`, `ready`, `cooling`, `unavailable`, `locks`, `strategy`,
+  `last_activity`). No account ids, names or credentials are exposed.
+  `?models=1` adds `model_count` (slower: resolves live catalogs).
+- `GET /v1/bridge` — one-call manifest: `modes` metadata plus `providers`,
+  `pools` and `combos` inline, with `counts`. Intended for picker bootstrap.
+
+The payload builders live in `src/lib/bridge/discovery.js` and are pure so they
+can be unit-tested without the DB (`tests/unit/bridge-discovery.test.js`).
+
 ## OAuth Onboarding and Token Refresh Lifecycle
 
 ```mermaid
@@ -466,6 +490,7 @@ flowchart LR
 ### Route and API Modules
 
 - `src/app/api/v1/*`, `src/app/api/v1beta/*`: compatibility APIs
+- `src/app/api/v1/{providers,combos,pools,bridge}`: bridge discovery APIs
 - `src/app/api/providers*`: provider CRUD, validation, testing
 - `src/app/api/provider-nodes*`: custom compatible node management
 - `src/app/api/oauth/*`: OAuth/device-code flows
