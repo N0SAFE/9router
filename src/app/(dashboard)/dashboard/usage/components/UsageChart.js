@@ -34,7 +34,7 @@ const VIEW_CONFIG = {
   cost:     { dataKey: "cost",     color: "#f59e0b", gradId: "gradCost",     formatter: fmtCost,     label: "Cost" },
 };
 
-export default function UsageChart({ period = "7d" }) {
+export default function UsageChart({ period = "7d", onSelectPeriod }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState("tokens");
@@ -83,6 +83,14 @@ export default function UsageChart({ period = "7d" }) {
       ) : !hasData ? (
         <div className="h-48 flex items-center justify-center text-text-muted text-sm">No data for this period</div>
       ) : (
+        <div
+          role={onSelectPeriod ? "button" : undefined}
+          tabIndex={onSelectPeriod ? 0 : undefined}
+          onClick={() => onSelectPeriod?.()}
+          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectPeriod?.(); }}
+          className={onSelectPeriod ? "cursor-pointer" : undefined}
+          title={onSelectPeriod ? "Open the requests behind this chart" : undefined}
+        >
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
             <defs>
@@ -134,6 +142,7 @@ export default function UsageChart({ period = "7d" }) {
             />
           </AreaChart>
         </ResponsiveContainer>
+        </div>
       )}
     </Card>
   );
@@ -141,4 +150,5 @@ export default function UsageChart({ period = "7d" }) {
 
 UsageChart.propTypes = {
   period: PropTypes.string,
+  onSelectPeriod: PropTypes.func,
 };
