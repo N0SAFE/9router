@@ -10,5 +10,21 @@ export async function register() {
 
     const { startModelCatalogSync } = await import("@/lib/modelCatalog/sync.js");
     startModelCatalogSync();
+
+    // Token Saver: start the 9Router-managed Headroom proxy at server boot when
+    // enabled. Best-effort — inference fails open to the provider if it fails.
+    try {
+      const { getSettings } = await import("@/lib/localDb");
+      const settings = await getSettings();
+      if (settings.headroomEnabled) {
+        const { startManagedHeadroomFromSettings } = await import("@/lib/headroom/process");
+        const result = await startManagedHeadroomFromSettings(settings);
+        if (result?.started === false && result.reason && result.reason !== "external_proxy") {
+          console.log("[Headroom] auto-start skipped:", result.reason);
+        }
+      }
+    } catch (e) {
+      console.log("[Headroom] auto-start failed:", e.message);
+    }
   }
 }

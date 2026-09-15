@@ -97,6 +97,18 @@ async function runHeavyStartup() {
     safeRestartTailscale("startup").catch((e) => console.log("[InitApp] Tailscale resume failed:", e.message));
   }
 
+  // Auto-start the managed Headroom proxy (Token Saver) when enabled and local.
+  if (settings.headroomEnabled) {
+    import("@/lib/headroom/process")
+      .then(({ startManagedHeadroomFromSettings }) => startManagedHeadroomFromSettings(settings))
+      .then((result) => {
+        if (result?.started === false && result.reason && result.reason !== "external_proxy") {
+          console.log("[InitApp] Headroom auto-start skipped:", result.reason);
+        }
+      })
+      .catch((e) => console.log("[InitApp] Headroom auto-start failed:", e.message));
+  }
+
   if (settings.tunnelEnabled) ensureCloudflared().catch(() => {});
 
   if (settings.mitmEnabled) {

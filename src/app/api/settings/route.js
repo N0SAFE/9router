@@ -78,6 +78,23 @@ export async function PATCH(request) {
 
     const settings = await updateSettings(body);
 
+    // Token Saver: owning 9Router process starts/stops with the Headroom toggle.
+    if (Object.prototype.hasOwnProperty.call(body, "headroomEnabled")) {
+      import("@/lib/headroom/process")
+        .then(({ startManagedHeadroomFromSettings, stopHeadroomProxy }) => {
+          if (settings.headroomEnabled) {
+            return startManagedHeadroomFromSettings(settings).then((result) => {
+              if (result?.started === false && result.reason && result.reason !== "external_proxy") {
+                console.warn("[Headroom] start skipped:", result.reason);
+              }
+            });
+          }
+          stopHeadroomProxy();
+          return null;
+        })
+        .catch((e) => console.warn("[Headroom] toggle failed:", e.message));
+    }
+
     // Apply outbound proxy settings immediately (no restart required)
     if (
       Object.prototype.hasOwnProperty.call(body, "outboundProxyEnabled") ||

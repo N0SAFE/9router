@@ -44,6 +44,9 @@ const DEFAULT_SETTINGS = {
   observabilityBatchSize: 20,
   observabilityFlushIntervalMs: 5000,
   observabilityMaxJsonSize: 5,
+  // "digest" (default) exposes bounded previews (roles, sizes, short snippets)
+  // in the Usage detail drawer; "none" keeps payloads fully redacted.
+  observabilityContentMode: "digest",
   outboundProxyEnabled: false,
   outboundProxyUrl: "",
   outboundNoProxy: "",
@@ -51,6 +54,10 @@ const DEFAULT_SETTINGS = {
   dnsToolEnabled: {},
   rtkEnabled: true,
   headroomEnabled: false,
+  // "compress" = POST /v1/compress (messages only, fail-open);
+  // "pipeline" = route outbound inference through the Headroom proxy for the
+  // full pipeline (tools/system/output shaping). Requires headroomEnabled.
+  headroomMode: "compress",
   headroomUrl: DEFAULT_HEADROOM_URL,
   headroomCompressUserMessages: false,
   headroomTimeoutMs: 3000,
