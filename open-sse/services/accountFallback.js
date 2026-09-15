@@ -13,6 +13,28 @@ export function getQuotaCooldown(backoffLevel = 0) {
 }
 
 /**
+ * Find the first ERROR_RULES entry matching this status/error text.
+ * Text rules take priority over status rules (top-to-bottom).
+ * @param {number} status - HTTP status code
+ * @param {string} errorText - Error message text
+ * @returns {object|null} Matched rule, or null when nothing matches
+ */
+export function matchFallbackRule(status, errorText) {
+  const lowerError = errorText
+    ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
+    : "";
+
+  for (const rule of ERROR_RULES) {
+    // Text-based rule: match substring in error message
+    if (rule.text && lowerError && lowerError.includes(rule.text)) return rule;
+    // Status-based rule: match HTTP status code
+    if (rule.status && rule.status === status) return rule;
+  }
+
+  return null;
+}
+
+/**
  * Check if error should trigger account fallback (switch to next account)
  * Config-driven: matches ERROR_RULES top-to-bottom (text rules first, then status)
  * @param {number} status - HTTP status code
@@ -21,32 +43,18 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
 export function checkFallbackError(status, errorText, backoffLevel = 0) {
-  const lowerError = errorText
-    ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
-    : "";
-
-  for (const rule of ERROR_RULES) {
-    // Text-based rule: match substring in error message
-    if (rule.text && lowerError && lowerError.includes(rule.text)) {
-      if (rule.backoff) {
-        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
-      }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
-    }
-
-    // Status-based rule: match HTTP status code
-    if (rule.status && rule.status === status) {
-      if (rule.backoff) {
-        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
-        return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
-      }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
-    }
+  const rule = matchFallbackRule(status, errorText);
+  if (!rule) {
+    // Default: transient cooldown for any unmatched error
+    return { shouldFallback: true, cooldownMs: TRANSIENT_COOLDOWN_MS };
   }
 
-  // Default: transient cooldown for any unmatched error
-  return { shouldFallback: true, cooldownMs: TRANSIENT_COOLDOWN_MS };
+  if (rule.backoff) {
+    const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
+    return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
+  }
+
+  return { shouldFallback: true, cooldownMs: rule.cooldownMs };
 }
 
 /**

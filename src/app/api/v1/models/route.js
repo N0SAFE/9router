@@ -300,6 +300,28 @@ export async function buildModelsList(kindFilter, options = {}) {
     }
   }
 
+  // A provider can have several active connections (account pool). When every
+  // account restricts its model list, expose the union so the public catalog
+  // shows all routable models once — never per-account ids. Mixed (some
+  // unrestricted) or no restriction keeps the registry list, as before.
+  const pooledEnabledModelsByProvider = new Map();
+  const providersWithUnrestrictedAccount = new Set();
+  for (const conn of connections) {
+    const enabled = conn?.providerSpecificData?.enabledModels;
+    if (Array.isArray(enabled) && enabled.length > 0) {
+      let set = pooledEnabledModelsByProvider.get(conn.provider);
+      if (!set) {
+        set = new Set();
+        pooledEnabledModelsByProvider.set(conn.provider, set);
+      }
+      for (const id of enabled) {
+        if (typeof id === "string" && id.trim()) set.add(id.trim());
+      }
+    } else {
+      providersWithUnrestrictedAccount.add(conn.provider);
+    }
+  }
+
   const models = [];
 
   // Combos first (filtered by kind). Web combos expose `kind` so AI knows search vs fetch.
@@ -362,9 +384,12 @@ export async function buildModelsList(kindFilter, options = {}) {
         || staticAlias
       ).trim();
       const providerModels = PROVIDER_MODELS[staticAlias] || [];
-      const enabledModels = conn?.providerSpecificData?.enabledModels;
+      const pooledEnabledModels = pooledEnabledModelsByProvider.get(providerId);
       const hasExplicitEnabledModels =
-        Array.isArray(enabledModels) && enabledModels.length > 0;
+        !!pooledEnabledModels && !providersWithUnrestrictedAccount.has(providerId);
+      const enabledModels = hasExplicitEnabledModels
+        ? [...pooledEnabledModels]
+        : conn?.providerSpecificData?.enabledModels;
       const isCompatibleProvider =
         isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId);
 
