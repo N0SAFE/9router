@@ -1,6 +1,7 @@
 import { Readable } from "stream";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { dbg } from "./debugLog.js";
+import { buildHeadroomTarget, getHeadroomPipelineContext, headersToObject, isHeadroomConnectError } from "../services/headroomPipeline.js";
 
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
@@ -293,6 +294,28 @@ async function createBypassRequest(parsedUrl, realIP, options) {
 
 export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   const targetUrl = typeof url === "string" ? url : url.toString();
+
+  // Headroom full-pipeline mode: route matching inference calls through the
+  // local Headroom proxy, which compresses and forwards to the provider. Scoped
+  // by AsyncLocalStorage to executor.execute(); everything else goes direct.
+  // Connection failures fail open to the original upstream.
+  const headroom = getHeadroomPipelineContext();
+  if (headroom) {
+    const headroomTarget = buildHeadroomTarget(targetUrl, headroom.url);
+    if (headroomTarget) {
+      const headers = headersToObject(options.headers);
+      headers["x-headroom-base-url"] = headroomTarget.upstreamBaseUrl;
+      if (headroomTarget.originalPath) headers["x-headroom-original-path"] = headroomTarget.originalPath;
+      dbg("HEADROOM", `pipeline → ${headroomTarget.url} upstream=${headroomTarget.upstreamBaseUrl}`);
+      try {
+        return await originalFetch(headroomTarget.url, { ...options, headers });
+      } catch (error) {
+        if (!isHeadroomConnectError(error)) throw error;
+        dbg("HEADROOM", `pipeline unreachable (${error.cause?.code || error.message}); falling back direct`);
+        return originalFetch(url, options);
+      }
+    }
+  }
 
   // Vercel relay: forward request via relay headers
   const vercelRelayUrl = normalizeString(proxyOptions?.vercelRelayUrl);

@@ -13,6 +13,7 @@ import {
 export default function TokenSaverClient() {
   const [rtkEnabled, setRtkEnabledState] = useState(true);
   const [headroomEnabled, setHeadroomEnabled] = useState(false);
+  const [headroomMode, setHeadroomMode] = useState("compress");
   const [headroomUrl, setHeadroomUrl] = useState("http://localhost:8787");
   const [headroomTimeoutMs, setHeadroomTimeoutMs] = useState(3000);
   const [headroomStatus, setHeadroomStatus] = useState({
@@ -115,6 +116,11 @@ export default function TokenSaverClient() {
     setHeadroomUrl(nextUrl);
     setHeadroomEnabled(value);
     patchSetting({ headroomEnabled: value, headroomUrl: nextUrl });
+  };
+
+  const handleHeadroomMode = (value) => {
+    setHeadroomMode(value);
+    patchSetting({ headroomMode: value });
   };
 
   const handleHeadroomUrlBlur = async () => {
@@ -422,6 +428,7 @@ export default function TokenSaverClient() {
           const data = await res.json();
           setRtkEnabledState(data.rtkEnabled !== false);
           setHeadroomEnabled(!!data.headroomEnabled);
+          setHeadroomMode(data.headroomMode === "pipeline" ? "pipeline" : "compress");
           setHeadroomUrl(data.headroomUrl || "http://localhost:8787");
           if (typeof data.headroomTimeoutMs === "number") setHeadroomTimeoutMs(data.headroomTimeoutMs);
           setCodeAware(data.headroomCodeAware === true);
@@ -534,8 +541,19 @@ export default function TokenSaverClient() {
               </button>
             </div>
             <p className="text-sm text-text-muted mt-1">
-              Compress prompts via /v1/compress before routing to the model
+              {headroomMode === "pipeline"
+                ? "Route upstream calls through Headroom: messages, tools, system and output shaping"
+                : "Compress prompts via /v1/compress before routing to the model"}
             </p>
+            <select
+              value={headroomMode}
+              onChange={(e) => handleHeadroomMode(e.target.value)}
+              disabled={!headroomEnabled}
+              className="mt-2 rounded border border-border bg-surface px-2 py-1 text-xs disabled:opacity-50"
+            >
+              <option value="compress">Compress messages only (/v1/compress)</option>
+              <option value="pipeline">Full pipeline (tools, system, output shaping)</option>
+            </select>
           </div>
           <Toggle
             checked={headroomEnabled}

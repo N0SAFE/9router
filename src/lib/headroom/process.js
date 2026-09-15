@@ -1,8 +1,9 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
-import { spawn } from "child_process";
+import { execFileSync, spawn } from "child_process";
 import { DATA_DIR } from "@/lib/dataDir.js";
-import { findHeadroomBinary, findPython310, HEADROOM_COMPRESSION_EXTRAS, EXTRA_MARKERS, getInstalledHeadroomExtras } from "./detect.js";
+import { findHeadroomBinary, findPython310, HEADROOM_COMPRESSION_EXTRAS, EXTRA_MARKERS, getInstalledHeadroomExtras, isLoopbackHeadroomUrl, DEFAULT_HEADROOM_URL } from "./detect.js";
 
 const HEADROOM_DIR = path.join(DATA_DIR, "headroom");
 const PID_FILE = path.join(HEADROOM_DIR, "proxy.pid");
@@ -52,6 +53,31 @@ function extrasProxyArgs({ codeAware, kompress } = {}) {
   return args;
 }
 
+// Safe defaults for running as 9Router's pipeline stage:
+//  - --no-ccr            no headroom_retrieve tool injection (clients have no MCP)
+//  - retries off         a 429 must reach 9Router's account pool immediately, not
+//                        be retried against the same rate-limited account for ~60s
+//  - TOOL_SEARCH off     no tool-schema deferral for clients that can't service it
+//  - OUTPUT_SHAPER on    verbosity steering + effort routing (request-side)
+//  - HTTP2 off           avoids upstream stalls seen with some OpenAI-compatible hosts
+function pipelineProxyArgs() {
+  return [
+    "--no-ccr",
+    "--retry-max-attempts", "1",
+    "--retry-base-delay-ms", "0",
+    "--retry-max-delay-ms", "0",
+  ];
+}
+
+function pipelineProxyEnv() {
+  return {
+    ...process.env,
+    HEADROOM_TOOL_SEARCH: "0",
+    HEADROOM_OUTPUT_SHAPER: "1",
+    HEADROOM_HTTP2: "0",
+  };
+}
+
 export async function startHeadroomProxy({ port = DEFAULT_PORT, codeAware = false, kompress = true } = {}) {
   const safePort = Number(port) > 0 && Number(port) < 65536 ? Number(port) : DEFAULT_PORT;
   const binary = findHeadroomBinary();
@@ -68,12 +94,17 @@ export async function startHeadroomProxy({ port = DEFAULT_PORT, codeAware = fals
   // spawn stdio requires fd numbers, not WriteStream objects.
   const outFd = fs.openSync(LOG_FILE, "a");
 
-  const args = ["proxy", "--port", String(safePort), ...extrasProxyArgs({ codeAware, kompress })];
+  const args = [
+    "proxy",
+    "--port", String(safePort),
+    ...pipelineProxyArgs(),
+    ...extrasProxyArgs({ codeAware, kompress }),
+  ];
   const child = spawn(binary, args, {
     stdio: ["ignore", outFd, outFd],
     detached: true,
     windowsHide: true,
-    env: { ...process.env },
+    env: pipelineProxyEnv(),
   });
 
   if (!child.pid) {
@@ -107,6 +138,34 @@ export async function startHeadroomProxy({ port = DEFAULT_PORT, codeAware = fals
   fs.closeSync(outFd);
 
   return { pid: child.pid, alreadyRunning: false };
+}
+
+function parsePortFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const port = parseInt(parsed.port, 10);
+    if (port > 0 && port < 65536) return port;
+  } catch { /* fall through */ }
+  return null;
+}
+
+/**
+ * Start the managed Headroom proxy from the current settings when 9Router owns
+ * the process (loopback URL). Best-effort: returns a reason instead of throwing
+ * so boot/toggle paths can fail open.
+ */
+export async function startManagedHeadroomFromSettings(settings = {}) {
+  const url = settings.headroomUrl || DEFAULT_HEADROOM_URL;
+  if (!isLoopbackHeadroomUrl(url)) return { started: false, reason: "external_proxy" };
+  try {
+    return await startHeadroomProxy({
+      port: parsePortFromUrl(url) || DEFAULT_PORT,
+      codeAware: settings.headroomCodeAware === true,
+      kompress: settings.headroomKompress !== false,
+    });
+  } catch (error) {
+    return { started: false, reason: error.code || error.message };
+  }
 }
 
 export function stopHeadroomProxy() {
@@ -163,6 +222,37 @@ export function getHeadroomLogTail(maxLines = 200) {
 // is rejected to keep the install surface predictable. Always installs the
 // `proxy` base + whatever extras the user picked, regardless of what is
 // already present.
+// Locate `uv` for environments where the headroom tool lives in a uv-managed
+// venv (no pip module available).
+function findUvBinary() {
+  const candidates = [
+    process.env.UV_BIN,
+    path.join(os.homedir(), ".local", "bin", "uv"),
+    path.join(os.homedir(), ".cargo", "bin", "uv"),
+    "uv",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      execFileSync(candidate, ["--version"], { stdio: "ignore", timeout: 3000 });
+      return candidate;
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
+// Build the install/uninstall command for the detected environment. pip first,
+// then `uv pip --python <py>` (uv tool venvs ship without pip).
+function packageManagerFor(py, mode) {
+  try {
+    execFileSync(py, ["-m", "pip", "--version"], { stdio: "ignore", timeout: 3000 });
+    return { cmd: py, prefix: ["-m", "pip", mode] };
+  } catch {
+    const uv = findUvBinary();
+    if (uv) return { cmd: uv, prefix: ["pip", mode, "--python", py] };
+    return null;
+  }
+}
+
 export async function installHeadroomExtras(extras = []) {
   const requested = Array.isArray(extras) ? extras.filter((e) => HEADROOM_COMPRESSION_EXTRAS.includes(e)) : [];
   const py = findPython310();
@@ -181,12 +271,18 @@ export async function installHeadroomExtras(extras = []) {
   // ['proxy', ...requested]. No shell interpolation.
   const extrasList = ["proxy", ...requested].join(",");
   const spec = `headroom-ai[${extrasList}]`;
-  const args = ["-m", "pip", "install", "--upgrade", spec];
+  const manager = packageManagerFor(py, "install");
+  if (!manager) {
+    const err = new Error("Neither pip nor uv is available to install Headroom extras");
+    err.code = "NO_PACKAGE_MANAGER";
+    throw err;
+  }
+  const args = [...manager.prefix, "--upgrade", spec];
 
   ensureDir();
   // Truncate ("w") so the log reflects only the current install for live progress.
   const outFd = fs.openSync(INSTALL_LOG_FILE, "w");
-  const child = spawn(py, args, {
+  const child = spawn(manager.cmd, args, {
     stdio: ["ignore", outFd, outFd],
     windowsHide: true,
     env: { ...process.env },
@@ -224,11 +320,18 @@ export async function uninstallHeadroomExtras(extras = []) {
     err.code = "INVALID_EXTRAS";
     throw err;
   }
-  const args = ["-m", "pip", "uninstall", "-y", ...pkgs];
+  const manager = packageManagerFor(py, "uninstall");
+  if (!manager) {
+    const err = new Error("Neither pip nor uv is available to remove Headroom extras");
+    err.code = "NO_PACKAGE_MANAGER";
+    throw err;
+  }
+  // pip needs explicit confirmation; `uv pip uninstall` does not prompt.
+  const args = manager.cmd === py ? [...manager.prefix, "-y", ...pkgs] : [...manager.prefix, ...pkgs];
 
   ensureDir();
   const outFd = fs.openSync(INSTALL_LOG_FILE, "w");
-  const child = spawn(py, args, {
+  const child = spawn(manager.cmd, args, {
     stdio: ["ignore", outFd, outFd],
     windowsHide: true,
     env: { ...process.env },
