@@ -315,9 +315,15 @@ a `modelsFetcher`, so the catalog tracks the account instead of a snapshot:
   in-memory cache keyed per provider/connection, fail-open to the registry's
   static `models` list (offline fallback only).
 - Applies to every catalog surface (`/v1/models`, `/v1/providers`,
-  `/v1/combos`, `/v1/bridge`). Ollama uses its account-scoped
-  `https://ollama.com/api/tags`, which also excludes models retired upstream;
-  Perplexity uses its authenticated `/v1/models`.
+  `/v1/combos`, `/v1/bridge`) and to the dashboard's model selector through
+  `GET /api/providers/{connectionId}/models` (same fetcher, per connection).
+- OpenRouter uses `type: "openrouter-all"`: the full live catalog with chat
+  models flagged `free: true` when pricing is 0/0. The bridge splits those into
+  separate "OpenRouter" / "OpenRouter Free" picker groups; routing ids are
+  unchanged.
+- Ollama uses its account-scoped `https://ollama.com/api/tags`, which also
+  excludes models retired upstream; Perplexity uses its authenticated
+  `/v1/models`.
 - Providers without a list endpoint keep the static registry list as their
   source of truth; adding `modelsFetcher` makes them dynamic without other
   code changes.

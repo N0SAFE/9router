@@ -54,6 +54,25 @@ export function parseFetcherPayload(type, json) {
       .filter((model) => typeof model.id === "string" && model.id.trim() !== "");
   }
 
+  // Full OpenRouter catalog: keep chat models, flag free ones (pricing 0/0).
+  if (type === "openrouter-all") {
+    const raw = Array.isArray(json?.data) ? json.data : [];
+    return raw
+      .filter((model) => {
+        const outputs = model?.architecture?.output_modalities;
+        return Array.isArray(outputs) && outputs.length > 0
+          ? outputs.includes("text")
+          : true;
+      })
+      .map((model) => ({
+        id: model?.id,
+        name: model?.name || model?.id,
+        free: model?.pricing?.prompt === "0" && model?.pricing?.completion === "0",
+        contextLength: model?.context_length,
+      }))
+      .filter((model) => typeof model.id === "string" && model.id.trim() !== "");
+  }
+
   if (type === "openai") {
     const raw = Array.isArray(json?.data) ? json.data : [];
     return raw
