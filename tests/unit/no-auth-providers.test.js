@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -29,7 +30,7 @@ vi.mock("@/shared/constants/providers", () => ({
   FREE_PROVIDERS: mocks.freeProviders,
 }));
 
-import { fetchNoAuthModels, noAuthProviderEntries, withNoAuthProviders } from "@/lib/providers/noAuthProviders.js";
+import { noAuthProviderEntries, withNoAuthProviders } from "@/lib/providers/noAuthProviders.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -44,55 +45,23 @@ describe("no-auth provider catalog support", () => {
     const connections = [{ id: "acc", provider: "ollama", isActive: true }];
     const result = withNoAuthProviders(connections);
 
-    expect(result).toHaveLength(2);
-    expect(result[0]).toBe(connections[0]);
-    expect(result[1]).toMatchObject({
-      id: "noauth:opencode",
-      provider: "opencode",
-      isActive: true,
-      noAuth: true,
-      providerSpecificData: {
-        modelsFetcher: { url: "https://opencode.ai/zen/v1/models", type: "opencode-free" },
-      },
-    });
-    expect(typeof result[1].provider).toBe("string");
+    assert.equal(result.length, 2);
+    assert.equal(result[0], connections[0]);
+    assert.equal(result[1].id, "noauth:opencode");
+    assert.equal(result[1].provider, "opencode");
+    assert.equal(result[1].isActive, true);
+    assert.equal(result[1].noAuth, true);
+    assert.equal(typeof result[1].provider, "string");
   });
 
   it("does not duplicate a provider that already has a connection", () => {
     const connections = [{ id: "acc", provider: "opencode", isActive: true }];
-    expect(withNoAuthProviders(connections)).toHaveLength(1);
+    assert.equal(withNoAuthProviders(connections).length, 1);
   });
 
-  it("fetches and filters live free models through the modelsFetcher", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({
-          data: [
-            { id: "claude-opus-5" },
-            { id: "muse-spark-1.3-contributor-free" },
-            { id: "deepseek-v4-flash-free" },
-            { id: "big-pickle" },
-          ],
-        }),
-      }))
-    );
-
-    const models = await fetchNoAuthModels({
-      url: "https://opencode.ai/zen/v1/models",
-      type: "opencode-free",
-    });
-
-    expect(models.map((model) => model.id)).toEqual([
-      "muse-spark-1.3-contributor-free",
-      "big-pickle",
-    ]);
-  });
-
-  it("fails open to an empty list", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false })));
-    expect(await fetchNoAuthModels({ url: "https://x/models", type: "opencode-free" })).toEqual([]);
-    expect(await fetchNoAuthModels(null)).toEqual([]);
+  it("keeps the input array untouched", () => {
+    const connections = [];
+    withNoAuthProviders(connections);
+    assert.equal(connections.length, 0);
   });
 });

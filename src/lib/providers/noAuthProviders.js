@@ -1,13 +1,10 @@
 import { FREE_PROVIDERS } from "@/shared/constants/providers";
-import { FILTERS } from "@/app/api/providers/suggested-models/filters.js";
 
 // No-auth (public/free) providers have no connection row, so every catalog that
 // iterates provider connections would silently drop them. These helpers add a
-// synthetic, credential-free connection for each usable free provider and fetch
-// their live model list when the provider declares a modelsFetcher.
-
-const FETCH_TTL_MS = 10 * 60 * 1000;
-const fetchCache = new Map();
+// synthetic, credential-free connection for each usable free provider. Their
+// model lists come from the provider's `modelsFetcher` (liveModels.js) exactly
+// like credentialed providers.
 
 export function noAuthProviderEntries() {
   return Object.entries(FREE_PROVIDERS)
@@ -15,7 +12,6 @@ export function noAuthProviderEntries() {
     .map(([id, provider]) => ({
       id,
       name: provider.name || id,
-      fetcher: provider.modelsFetcher || null,
     }));
 }
 
@@ -34,42 +30,7 @@ export function withNoAuthProviders(connections = []) {
       name: entry.name,
       isActive: true,
       noAuth: true,
-      providerSpecificData: entry.fetcher ? { modelsFetcher: entry.fetcher } : {},
+      providerSpecificData: {},
     }));
   return [...(connections || []), ...synthetic];
-}
-
-/**
- * Fetch a no-auth provider's live model list through its modelsFetcher config,
- * reusing the same per-type parsers as the dashboard's suggested-models API.
- * Cached in memory, fail-open to [].
- */
-export async function fetchNoAuthModels(fetcher) {
-  if (!fetcher?.url || !fetcher?.type) {
-    return [];
-  }
-  const cached = fetchCache.get(fetcher.url);
-  if (cached && Date.now() < cached.expiresAt) {
-    return cached.data;
-  }
-  const filter = FILTERS[fetcher.type];
-  if (!filter) {
-    return [];
-  }
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch(fetcher.url, { signal: controller.signal, cache: "no-store" });
-    clearTimeout(timer);
-    if (!response.ok) {
-      return [];
-    }
-    const json = await response.json();
-    const raw = json?.data ?? json?.models ?? json;
-    const data = filter(Array.isArray(raw) ? raw : []);
-    fetchCache.set(fetcher.url, { data, expiresAt: Date.now() + FETCH_TTL_MS });
-    return data;
-  } catch {
-    return [];
-  }
 }

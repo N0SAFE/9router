@@ -31,6 +31,9 @@ export default {
     { id: "minimax-m3", name: "MiniMax M3" },
     { id: "deepseek-v4.1-flash:cloud", name: "DeepSeek V4.1 Flash" },
   ],
+  // Live account model list. The static list above is only an offline fallback:
+  // /api/tags is account-scoped and already excludes retired models.
+  modelsFetcher: { url: "https://ollama.com/api/tags", type: "ollama-tags", auth: "bearer" },
   serviceKinds: ["llm", "webFetch"],
   fetchConfig: {
     baseUrl: "https://ollama.com/api/web_fetch",

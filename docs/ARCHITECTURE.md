@@ -300,8 +300,27 @@ pickers, these read-only, secret-free endpoints are available under `/v1`
   `llm,image,tts,stt,embedding,imageToText,video,webSearch,webFetch`
   (default `llm`). Providers with no active account and no free access never
   appear, so a model in this list is always routable. Model entries include
-  `name` when known and live-fetched free models come from the provider's
-  public models endpoint (with the static registry as fallback).
+  `name` when known.
+
+### Live provider model lists
+
+Model lists are fetched from the provider whenever its registry entry declares
+a `modelsFetcher`, so the catalog tracks the account instead of a snapshot:
+
+- `modelsFetcher: { url, type, auth? }` on the registry entry; `auth` is
+  `"bearer"` or `"api-key"` and carries the selected connection's own
+  credential (never a global key). Public endpoints (OpenCode Free, OpenRouter,
+  Venice, Vercel AI Gateway, Kilo, Airforce, MiMo) omit `auth`.
+- Implemented in `src/lib/providers/liveModels.js`: 8s timeout, 10-minute
+  in-memory cache keyed per provider/connection, fail-open to the registry's
+  static `models` list (offline fallback only).
+- Applies to every catalog surface (`/v1/models`, `/v1/providers`,
+  `/v1/combos`, `/v1/bridge`). Ollama uses its account-scoped
+  `https://ollama.com/api/tags`, which also excludes models retired upstream;
+  Perplexity uses its authenticated `/v1/models`.
+- Providers without a list endpoint keep the static registry list as their
+  source of truth; adding `modelsFetcher` makes them dynamic without other
+  code changes.
 - `GET /v1/combos` — configured combos with their models; every model carries
   `available: true|false` based on whether its provider has an active connection.
 - `GET /v1/pools` — per-provider account pool health as counts only

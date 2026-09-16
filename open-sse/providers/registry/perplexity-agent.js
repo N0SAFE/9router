@@ -44,6 +44,6 @@ export default {
     endpoint: "https://api.perplexity.ai/v1/responses",
     pricingUrl: "https://docs.perplexity.ai/docs/agent-api/models",
   },
-  modelsFetcher: { url: "https://api.perplexity.ai/v1/models", type: "openai" },
+  modelsFetcher: { url: "https://api.perplexity.ai/v1/models", type: "openai", auth: "bearer" },
   passthroughModels: true,
 };

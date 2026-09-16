@@ -87,7 +87,9 @@ export default {
   ],
   // Live catalogue; ids outside this curated list get their endpoint lane from the
   // family regex in providers/models/helpers.js (opencodeFamilyFormats).
-  modelsFetcher: { url: "https://opencode.ai/zen/go/v1/models", type: "opencode-go" },
+  // Fetched with the connection's own key: tracks plan changes and drops retired
+  // models (e.g. minimax-m2.5). Static registry list above is the offline fallback.
+  modelsFetcher: { url: "https://opencode.ai/zen/go/v1/models", type: "opencode-go", auth: "bearer" },
   passthroughModels: true,
   features: {
     usage: true,
