@@ -67,6 +67,8 @@ import p64 from "./nvidia.js";
 import p65 from "./ollama-local.js";
 import p66 from "./ollama.js";
 import p123 from "./ollama-search.js";
+import p139 from "./llamacpp.js";
+import p140 from "./vllm.js";
 import p67 from "./openai.js";
 import p68 from "./opencode-go.js";
 import p68z from "./opencode-zen.js";
@@ -276,4 +278,6 @@ export default [
   p136,
   p137,
   p138,
+  p139,
+  p140,
 ];

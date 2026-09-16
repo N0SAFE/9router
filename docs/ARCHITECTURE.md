@@ -339,6 +339,28 @@ a `modelsFetcher`, so the catalog tracks the account instead of a snapshot:
 The payload builders live in `src/lib/bridge/discovery.js` and are pure so they
 can be unit-tested without the DB (`tests/unit/bridge-discovery.test.js`).
 
+## Local Model Management
+
+Local providers get a dedicated manager on their provider page and
+dashboard-auth endpoints under `/api/local`:
+
+- `ollama-local` — installed models (`/api/tags`), running models with VRAM
+  (`/api/ps`), latency test, delete and unload proxied through
+  `/api/local/ollama/{status,models,unload,test}`. `POST
+  /api/local/ollama/pull` streams Ollama's NDJSON pull progress so the UI can
+  render a live progress bar, and the install combobox is populated from a
+  cached scrape of ollama.com/library (`/api/local/ollama/library`, curated
+  offline fallback, per-model tags).
+- `llamacpp` (port 8080) and `vllm` (port 8000) — no-auth local providers:
+  when the server runs, `{{baseUrl}}/v1/models` is fetched live and the models
+  appear automatically in every catalog. `/api/local/server/status` reports
+  health, the served model and llama.cpp's context size.
+- `modelsFetcher` URLs understand `{{baseUrl}}`, expanded from the
+  connection's `providerSpecificData.baseUrl` or the provider's default
+  transport origin (localhost:11434 / 8080 / 8000).
+- `/api/local/*` is dashboard-auth protected; remote callers are subject to
+  the same SSRF guard as provider-node validation.
+
 ## OAuth Onboarding and Token Refresh Lifecycle
 
 ```mermaid

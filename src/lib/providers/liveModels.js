@@ -1,4 +1,5 @@
 import { AI_PROVIDERS } from "@/shared/constants/providers";
+import { PROVIDERS } from "open-sse/providers/index.js";
 import { FILTERS } from "@/app/api/providers/suggested-models/filters.js";
 
 // Provider model lists should come from the provider whenever it exposes one.
@@ -16,6 +17,45 @@ const cache = new Map();
 
 export function modelsFetcherFor(providerId) {
   return AI_PROVIDERS[providerId]?.modelsFetcher || null;
+}
+
+const KNOWN_PATH_SUFFIXES = [
+  "/v1/chat/completions",
+  "/v1/responses",
+  "/v1/messages",
+  "/v1/embeddings",
+  "/api/chat",
+  "/api/generate",
+  "/api/tags",
+];
+
+function stripKnownPath(url) {
+  let base = String(url || "").trim().replace(/\/+$/, "");
+  for (const suffix of KNOWN_PATH_SUFFIXES) {
+    if (base.endsWith(suffix)) {
+      base = base.slice(0, -suffix.length).replace(/\/+$/, "");
+      break;
+    }
+  }
+  return base;
+}
+
+/**
+ * Resolve a fetcher URL. `{{baseUrl}}` expands to the connection's own base
+ * URL when set, else to the provider's default transport origin (e.g.
+ * ollama-local → http://localhost:11434, llama.cpp → http://localhost:8080).
+ */
+export function resolveFetcherUrl(providerId, fetcher, connection) {
+  const raw = typeof fetcher?.url === "string" ? fetcher.url : "";
+  if (!raw.includes("{{baseUrl}}")) {
+    return raw;
+  }
+  const custom = connection?.providerSpecificData?.baseUrl;
+  // AI_PROVIDERS carries the display metadata; the transport (base URL) lives
+  // in PROVIDERS — built from the same registry entry.
+  const fallback = PROVIDERS[providerId]?.baseUrl || AI_PROVIDERS[providerId]?.transport?.baseUrl || "";
+  const base = stripKnownPath(custom || fallback);
+  return base ? raw.replace("{{baseUrl}}", base) : raw;
 }
 
 function authHeaders(fetcher, connection) {
@@ -85,7 +125,8 @@ export function parseFetcherPayload(type, json) {
 
 function cacheKey(providerId, fetcher, connection) {
   const fingerprint = (connection?.apiKey || connection?.accessToken || "").slice(-8);
-  return [providerId, connection?.id || "", fetcher.url, fingerprint].join("|");
+  const base = connection?.providerSpecificData?.baseUrl || "";
+  return [providerId, connection?.id || "", fetcher.url, base, fingerprint].join("|");
 }
 
 /**
@@ -108,7 +149,7 @@ export async function fetchConnectionModels(providerId, connection, options = {}
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? FETCH_TIMEOUT_MS);
-    const response = await fetch(fetcher.url, {
+    const response = await fetch(resolveFetcherUrl(providerId, fetcher, connection), {
       headers: authHeaders(fetcher, connection),
       signal: controller.signal,
       cache: "no-store",
