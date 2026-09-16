@@ -66,6 +66,6 @@ export default {
     baseUrl: "https://openrouter.ai/api/v1/videos",
     headers: {"HTTP-Referer":"https://endpoint-proxy.local","X-Title":"Endpoint Proxy"},
   },
-  modelsFetcher: { url: "https://openrouter.ai/api/v1/models", type: "openrouter-free" },
+  modelsFetcher: { url: "https://openrouter.ai/api/v1/models", type: "openrouter-all", auth: "bearer" },
   passthroughModels: true,
 };

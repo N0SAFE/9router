@@ -5,6 +5,7 @@ import { GEMINI_CONFIG } from "@/lib/oauth/constants/oauth";
 import { refreshGoogleToken, refreshCodexToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
+import { fetchConnectionModels } from "@/lib/providers/liveModels";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
@@ -556,6 +557,16 @@ export async function GET(request, { params }) {
 
     const config = PROVIDER_MODELS_CONFIG[connection.provider];
     if (!config) {
+      // Registry providers that declare a modelsFetcher expose their own list
+      // endpoint (Ollama /api/tags, OpenRouter /models, OpenCode Go, …).
+      const liveModels = await fetchConnectionModels(connection.provider, connection);
+      if (liveModels.length > 0) {
+        return NextResponse.json({
+          provider: connection.provider,
+          connectionId: connection.id,
+          models: liveModels,
+        });
+      }
       return NextResponse.json(
         { error: `Provider ${connection.provider} does not support models listing` },
         { status: 400 }

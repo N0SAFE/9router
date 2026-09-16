@@ -408,6 +408,8 @@ export async function buildModelsList(kindFilter, options = {}) {
       let liveModelKindById = new Map();
       let liveCapabilitiesById = new Map();
       let liveNamesById = new Map();
+      let liveContextById = new Map();
+      let liveFreeById = new Map();
 
       let rawModelIds = hasExplicitEnabledModels
         ? Array.from(
@@ -451,17 +453,34 @@ export async function buildModelsList(kindFilter, options = {}) {
       }
 
       // Provider-declared live model list (auth-aware `modelsFetcher`, e.g.
-      // Ollama's account-scoped /api/tags or OpenCode Free's public endpoint).
-      // Prefer it over the static registry list; the static list is the
-      // fallback when the provider does not expose a list or the fetch fails.
-      if (!liveResolverApplied && !hasExplicitEnabledModels && !skipDynamicFetch) {
+      // Ollama's account-scoped /api/tags or OpenRouter's /models). Prefer it
+      // over the static registry list for LLM entries; typed static models
+      // (embedding/tts/image/video) are merged back so media catalogs keep
+      // working. The static list remains the fallback when the fetch fails.
+      if (
+        !liveResolverApplied &&
+        !hasExplicitEnabledModels &&
+        !skipDynamicFetch &&
+        kindFilter.includes(LLM_KIND)
+      ) {
         try {
           const live = await fetchConnectionModels(providerId, conn);
           if (live.length > 0) {
-            rawModelIds = live.map((m) => m.id);
+            const nonLlmStaticIds = providerModels
+              .filter((model) => modelKind(model) !== LLM_KIND)
+              .map((model) => model.id);
+            rawModelIds = [...live.map((m) => m.id), ...nonLlmStaticIds];
             liveModelKindById = new Map(live.filter((m) => m?.id).map((m) => [m.id, LLM_KIND]));
             liveNamesById = new Map(
               live.filter((m) => m?.id).map((m) => [m.id, m.name || m.id])
+            );
+            liveContextById = new Map(
+              live
+                .filter((m) => m?.id && Number.isFinite(m.contextLength))
+                .map((m) => [m.id, m.contextLength])
+            );
+            liveFreeById = new Map(
+              live.filter((m) => m?.id).map((m) => [m.id, m.free === true])
             );
           }
         } catch (err) {
@@ -543,6 +562,7 @@ export async function buildModelsList(kindFilter, options = {}) {
           object: "model",
           owned_by: outputAlias,
           ...(modelName ? { name: modelName } : {}),
+          ...(liveFreeById.get(modelId) === true ? { free: true } : {}),
         };
         // Live-catalog resolvers (kiro/qoder/github/clinepass) mostly only return
         // { id, name } — no per-model capability data. Fall back to the same
@@ -570,6 +590,9 @@ export async function buildModelsList(kindFilter, options = {}) {
             if (!Number.isFinite(contextWindow)) contextWindow = fallback.contextWindow;
             if (!Number.isFinite(maxOutput)) maxOutput = fallback.maxOutput;
           }
+          // Live context (e.g. OpenRouter) beats guessed/static windows.
+          const liveContext = liveContextById.get(modelId);
+          if (Number.isFinite(liveContext)) contextWindow = liveContext;
           if (Number.isFinite(contextWindow)) model.context_length = contextWindow;
           if (Number.isFinite(maxOutput)) model.max_completion_tokens = maxOutput;
         }

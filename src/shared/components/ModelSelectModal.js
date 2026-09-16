@@ -21,8 +21,12 @@ const PROVIDER_ORDER = [
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
 
 // Providers with per-account live catalogs via /api/providers/[id]/models.
-// Static registry stays as fallback when live fetch fails or is empty.
-const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass"];
+// Any registry provider that declares a modelsFetcher (Ollama, OpenRouter,
+// OpenCode Go, …) exposes a live list; the static registry stays as fallback
+// when live fetch fails or is empty.
+const LIVE_CATALOG_PROVIDERS = Object.values(AI_PROVIDERS)
+  .filter((provider) => provider?.modelsFetcher)
+  .map((provider) => provider.id);
 
 // Fetch a provider's account-scoped catalog for every active connection and merge
 // the results. Entries collapse by model id on purpose: two connections of the
@@ -66,6 +70,60 @@ function useLiveProviderModels(isOpen, connectionIds, label) {
   }, [isOpen, idsKey, label]);
 
   return models;
+}
+
+// Fetch live catalogs for every provider with a modelsFetcher (one request per
+// active connection) and group the merged lists by provider id. Failures are
+// ignored so the static registry fallback still renders.
+function useLiveCatalogModels(isOpen, connectionIds) {
+  const [modelsByProvider, setModelsByProvider] = useState({});
+  const idsKey = (connectionIds ?? []).join("|");
+
+  useEffect(() => {
+    const ids = idsKey ? idsKey.split("|") : [];
+    if (!isOpen || ids.length === 0) {
+      // Keep the previous map: the selector is closed or has no live sources.
+      return undefined;
+    }
+
+    let cancelled = false;
+    Promise.all(ids.map(async (connectionId) => {
+      try {
+        const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
+        if (!response.ok) return null;
+        const data = await response.json();
+        return {
+          provider: data.provider,
+          models: Array.isArray(data.models) ? data.models : [],
+        };
+      } catch {
+        return null;
+      }
+    }))
+      .then((results) => {
+        if (cancelled) return;
+        const grouped = {};
+        for (const result of results) {
+          if (!result?.provider || result.models.length === 0) continue;
+          const list = grouped[result.provider] || (grouped[result.provider] = []);
+          const seen = new Set(list.map((model) => model.id));
+          for (const model of result.models) {
+            if (!model?.id || seen.has(model.id)) continue;
+            seen.add(model.id);
+            list.push(model);
+          }
+        }
+        setModelsByProvider(grouped);
+      })
+      .catch((error) => {
+        console.warn("Unable to load live provider catalogs for selector:", error);
+        if (!cancelled) setModelsByProvider({});
+      });
+
+    return () => { cancelled = true; };
+  }, [isOpen, idsKey]);
+
+  return modelsByProvider;
 }
 
 export default function ModelSelectModal({
@@ -116,6 +174,16 @@ export default function ModelSelectModal({
   const cursorModels = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
   const clineModels = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
   const clinepassModels = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
+
+  // Registry providers with a modelsFetcher (Ollama, OpenRouter, OpenCode Go,
+  // Perplexity, …) fetch their catalog live per active connection.
+  const liveConnectionIds = useMemo(
+    () => activeProviders
+      .filter((provider) => LIVE_CATALOG_PROVIDERS.includes(provider.provider))
+      .map((provider) => provider.id),
+    [activeProviders]
+  );
+  const liveModelsByProvider = useLiveCatalogModels(isOpen, liveConnectionIds);
 
   const fetchCombos = async () => {
     try {
@@ -348,7 +416,8 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : [];
+        const liveModels = liveModelsByProvider[providerId]
+          ?? (providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : []);
         const hardcodedModels = liveModels.length > 0
           ? liveModels
           : getModelsByProviderId(providerId);
@@ -375,7 +444,7 @@ export default function ModelSelectModal({
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [
-          ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) })),
+          ...hardcodedModels.map((m) => ({ id: m.id, name: m.free ? `${m.name} (free)` : m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) })),
           ...customAliasModels,
           ...customRegisteredModels,
         ];
@@ -420,7 +489,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels, liveModelsByProvider]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {

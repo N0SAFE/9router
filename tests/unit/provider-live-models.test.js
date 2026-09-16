@@ -73,6 +73,37 @@ describe("provider live model lists", () => {
     ]);
   });
 
+  it("parses the OpenRouter catalog with free flags", () => {
+    const models = parseFetcherPayload("openrouter-all", {
+      data: [
+        {
+          id: "openai/gpt-5",
+          name: "GPT-5",
+          pricing: { prompt: "0.001", completion: "0.002" },
+          context_length: 400000,
+          architecture: { output_modalities: ["text"] },
+        },
+        {
+          id: "meta/llama-free",
+          name: "Llama Free",
+          pricing: { prompt: "0", completion: "0" },
+          context_length: 131072,
+          architecture: { output_modalities: ["text"] },
+        },
+        {
+          id: "openai/text-embedding-3",
+          pricing: { prompt: "0", completion: "0" },
+          context_length: 8191,
+          architecture: { output_modalities: ["embeddings"] },
+        },
+      ],
+    });
+    assert.deepEqual(models, [
+      { id: "openai/gpt-5", name: "GPT-5", free: false, contextLength: 400000 },
+      { id: "meta/llama-free", name: "Llama Free", free: true, contextLength: 131072 },
+    ]);
+  });
+
   it("fetches with the connection's own bearer token and caches the result", async () => {
     const seen = [];
     vi.stubGlobal(
