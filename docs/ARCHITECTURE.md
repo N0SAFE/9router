@@ -295,10 +295,13 @@ pickers, these read-only, secret-free endpoints are available under `/v1`
 (same CORS/no-store behavior as `/v1/models`):
 
 - `GET /v1/providers` — providers that currently have at least one active
-  connection, each with its routable models grouped underneath. `?kind=` accepts
-  any of `llm,image,tts,stt,embedding,imageToText,video,webSearch,webFetch`
-  (default `llm`). Providers with no active account never appear, so a model in
-  this list is always routable.
+  connection, plus usable no-auth free providers (e.g. OpenCode Free), each
+  with its routable models grouped underneath. `?kind=` accepts any of
+  `llm,image,tts,stt,embedding,imageToText,video,webSearch,webFetch`
+  (default `llm`). Providers with no active account and no free access never
+  appear, so a model in this list is always routable. Model entries include
+  `name` when known and live-fetched free models come from the provider's
+  public models endpoint (with the static registry as fallback).
 - `GET /v1/combos` — configured combos with their models; every model carries
   `available: true|false` based on whether its provider has an active connection.
 - `GET /v1/pools` — per-provider account pool health as counts only

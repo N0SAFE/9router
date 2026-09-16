@@ -18,6 +18,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { withNoAuthProviders, fetchNoAuthModels } from "@/lib/providers/noAuthProviders";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -260,6 +261,9 @@ export async function buildModelsList(kindFilter, options = {}) {
   try {
     connections = await getProviderConnections();
     connections = connections.filter(c => c.isActive !== false);
+    // No-auth (free) providers have no connection row but are routable, so add
+    // a synthetic credential-free entry or their models never reach catalogs.
+    connections = withNoAuthProviders(connections);
   } catch (e) {
     console.log("Could not fetch providers, returning all models");
   }
@@ -397,8 +401,12 @@ export async function buildModelsList(kindFilter, options = {}) {
       const staticModelKindById = new Map(
         providerModels.map((m) => [m.id, modelKind(m)])
       );
+      const staticModelNameById = new Map(
+        providerModels.filter((m) => m.name).map((m) => [m.id, m.name])
+      );
       let liveModelKindById = new Map();
       let liveCapabilitiesById = new Map();
+      let liveNamesById = new Map();
 
       let rawModelIds = hasExplicitEnabledModels
         ? Array.from(
@@ -412,6 +420,25 @@ export async function buildModelsList(kindFilter, options = {}) {
 
       if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
         rawModelIds = await fetchCompatibleModelIds(conn);
+      }
+
+      // No-auth providers (e.g. OpenCode Free) can declare a public models
+      // endpoint. Prefer it so free models track upstream, falling back to the
+      // static registry list on failure.
+      const freeFetcher = conn?.noAuth ? conn?.providerSpecificData?.modelsFetcher : null;
+      if (freeFetcher && !hasExplicitEnabledModels && !skipDynamicFetch) {
+        try {
+          const live = await fetchNoAuthModels(freeFetcher);
+          if (live.length > 0) {
+            rawModelIds = live.map((m) => m.id);
+            liveModelKindById = new Map(live.filter((m) => m?.id).map((m) => [m.id, LLM_KIND]));
+            liveNamesById = new Map(
+              live.filter((m) => m?.id).map((m) => [m.id, m.name || m.id])
+            );
+          }
+        } catch (err) {
+          console.log(`Free model fetch failed for ${providerId}: ${err?.message || err}`);
+        }
       }
 
       // Config-driven live catalog override (e.g. Kiro returns dynamic
@@ -507,10 +534,12 @@ export async function buildModelsList(kindFilter, options = {}) {
         if (!kindFilter.includes(kind) && !allowAsLlm) continue;
         if (isDisabled(outputAlias, modelId) || isDisabled(staticAlias, modelId)) continue;
 
+        const modelName = liveNamesById.get(modelId) || staticModelNameById.get(modelId);
         const model = {
           id: `${outputAlias}/${modelId}`,
           object: "model",
           owned_by: outputAlias,
+          ...(modelName ? { name: modelName } : {}),
         };
         // Live-catalog resolvers (kiro/qoder/github/clinepass) mostly only return
         // { id, name } — no per-model capability data. Fall back to the same

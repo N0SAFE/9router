@@ -1,5 +1,6 @@
 import { buildModelsList } from "../models/route";
 import { getProviderConnections, getSettings } from "@/lib/localDb";
+import { withNoAuthProviders } from "@/lib/providers/noAuthProviders";
 import {
   bridgeJson,
   bridgeOptions,
@@ -20,11 +21,12 @@ export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const kinds = parseKinds(searchParams.get("kind"));
-    const [models, connections, settings] = await Promise.all([
+    const [models, rawConnections, settings] = await Promise.all([
       buildModelsList(kinds),
       getProviderConnections().catch(() => []),
       getSettings().catch(() => ({})),
     ]);
+    const connections = withNoAuthProviders(rawConnections);
 
     return bridgeJson({
       object: "list",
