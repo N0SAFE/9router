@@ -17,6 +17,7 @@ import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels"
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
+import LocalModelsPanel from "./LocalModelsPanel";
 import ConnectionRow from "./ConnectionRow";
 import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
@@ -1423,6 +1424,13 @@ export default function ProviderDetailPage() {
             </a>
           )}
         </div>
+      )}
+
+      {["ollama-local", "llamacpp", "vllm"].includes(providerId) && (
+        <LocalModelsPanel
+          providerId={providerId}
+          host={connections[0]?.providerSpecificData?.baseUrl || ""}
+        />
       )}
 
       {isCompatible && providerNode && (

@@ -9,6 +9,20 @@ const mocks = vi.hoisted(() => ({
       name: "Ollama Cloud",
       modelsFetcher: { url: "https://ollama.com/api/tags", type: "ollama-tags", auth: "bearer" },
     },
+    "ollama-local": {
+      id: "ollama-local",
+      alias: "ollama-local",
+      name: "Ollama Local",
+      transport: { baseUrl: "http://localhost:11434/api/chat" },
+      modelsFetcher: { url: "{{baseUrl}}/api/tags", type: "ollama-tags" },
+    },
+    llamacpp: {
+      id: "llamacpp",
+      alias: "llamacpp",
+      name: "llama.cpp (local)",
+      transport: { baseUrl: "http://localhost:8080/v1/chat/completions" },
+      modelsFetcher: { url: "{{baseUrl}}/v1/models", type: "openai" },
+    },
     opencode: {
       id: "opencode",
       alias: "oc",
@@ -28,10 +42,18 @@ vi.mock("@/shared/constants/providers", () => ({
   AI_PROVIDERS: mocks.providers,
 }));
 
+vi.mock("open-sse/providers/index.js", () => ({
+  PROVIDERS: {
+    "ollama-local": { baseUrl: "http://localhost:11434/api/chat" },
+    llamacpp: { baseUrl: "http://localhost:8080/v1/chat/completions" },
+  },
+}));
+
 import {
   fetchConnectionModels,
   modelsFetcherFor,
   parseFetcherPayload,
+  resolveFetcherUrl,
 } from "@/lib/providers/liveModels.js";
 
 afterEach(() => {
@@ -42,6 +64,39 @@ describe("provider live model lists", () => {
   it("resolves the registry modelsFetcher", () => {
     expect(modelsFetcherFor("ollama")).toMatchObject({ type: "ollama-tags", auth: "bearer" });
     expect(modelsFetcherFor("plain")).toBeNull();
+  });
+
+  it("expands {{baseUrl}} from the connection or the provider default", () => {
+    expect(
+      resolveFetcherUrl("ollama-local", modelsFetcherFor("ollama-local"), {
+        providerSpecificData: { baseUrl: "http://192.168.1.50:11434/" },
+      })
+    ).toBe("http://192.168.1.50:11434/api/tags");
+    expect(resolveFetcherUrl("llamacpp", modelsFetcherFor("llamacpp"), {})).toBe(
+      "http://localhost:8080/v1/models"
+    );
+    expect(
+      resolveFetcherUrl("ollama-local", modelsFetcherFor("ollama-local"), {})
+    ).toBe("http://localhost:11434/api/tags");
+  });
+
+  it("fetches a local provider from its custom host", async () => {
+    const seen = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        seen.push(url);
+        return { ok: true, json: async () => ({ models: [{ name: "llama3.2:latest", model: "llama3.2:latest" }] }) };
+      })
+    );
+
+    const models = await fetchConnectionModels("ollama-local", {
+      id: "conn-local-custom",
+      providerSpecificData: { baseUrl: "http://127.0.0.1:11500" },
+    });
+
+    expect(seen).toEqual(["http://127.0.0.1:11500/api/tags"]);
+    expect(models).toEqual([{ id: "llama3.2:latest", name: "llama3.2:latest" }]);
   });
 
   it("parses Ollama /api/tags payloads", () => {
