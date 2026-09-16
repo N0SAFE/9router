@@ -13,7 +13,9 @@ export default {
       text: "Local Ollama server (default http://localhost:11434). Installed models are listed live from /api/tags; install/remove models from the provider page.",
     },
   },
-  category: "apikey",
+  category: "free",
+  authModes: ["apikey"],
+  keyOptional: true,
   transport: {
     baseUrl: "http://localhost:11434/v1/chat/completions",
     format: "openai",

@@ -43,8 +43,37 @@ function formatDate(value) {
  * - llama.cpp / vLLM: server status and the model(s) the server currently
  *   serves, with the command to load a different one.
  */
-export default function LocalModelsPanel({ providerId, host = "" }) {
+export default function LocalModelsPanel({ providerId, connections = [] }) {
   const isOllama = providerId === "ollama-local";
+  const hostOptions = useMemo(() => {
+    const seen = new Set();
+    const options = [];
+    for (const connection of connections) {
+      if (!connection || connection.isActive === false) {
+        continue;
+      }
+      const baseUrl = connection.providerSpecificData?.baseUrl || "";
+      const key = baseUrl || "__default__";
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      options.push({
+        id: connection.id,
+        label: `${connection.name || SERVER_DEFAULTS[providerId] || "server"}${baseUrl ? ` · ${baseUrl}` : ""}`,
+        host: baseUrl,
+      });
+    }
+    if (options.length === 0) {
+      options.push({ id: "default", label: SERVER_DEFAULTS[providerId] || "default", host: "" });
+    }
+    return options;
+  }, [connections, providerId]);
+  const [selectedHostId, setSelectedHostId] = useState("");
+  const selectedHost = hostOptions.find((option) => option.id === selectedHostId) || hostOptions[0];
+  const host = selectedHost?.host || "";
+  const isLocalHost =
+    !host || /(^|\/\/)(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:|\/|$)/i.test(host);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState("");
   const [library, setLibrary] = useState([]);
@@ -356,6 +385,19 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
             {online ? ` · ${models.length} model${models.length === 1 ? "" : "s"}` : ""}
             {isOllama && status?.version ? ` · v${status.version}` : ""}
           </p>
+          {hostOptions.length > 1 && (
+            <select
+              value={selectedHost?.id || ""}
+              onChange={(event) => setSelectedHostId(event.target.value)}
+              className="mt-2 w-full max-w-sm rounded-lg border border-border bg-surface-2 px-2 py-1.5 text-xs text-text-main outline-none focus:border-brand-500/50"
+            >
+              {hostOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${online ? "bg-green-500/10 text-green-600 dark:text-green-400" : "bg-red-500/10 text-red-600 dark:text-red-400"}`}>
@@ -438,6 +480,7 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
         </div>
       )}
 
+      {isLocalHost ? (
       <div className="mb-5 rounded-lg border border-border bg-surface-2/40 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-sm font-medium">Server process</p>
@@ -519,6 +562,12 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
           </pre>
         ) : null}
       </div>
+      ) : (
+        <div className="mb-5 rounded-lg border border-border bg-surface-2/40 p-3 text-xs text-text-muted">
+          This connection points at a remote server — start/stop and logs are available for local
+          hosts only. Manage the process on the host machine.
+        </div>
+      )}
 
       {!isOllama && online && serverModel && (
         <div className="mb-5 rounded-lg border border-border bg-surface-2/40 p-3 text-sm">

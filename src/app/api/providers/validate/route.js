@@ -99,7 +99,8 @@ export async function POST(request) {
     // that replaces the API key (Bedrock's `profile`), so validating that setup must not 400.
     const apiKeySubstitute = AI_PROVIDERS[provider]?.apiKeyOptionalWith;
     const hasApiKeySubstitute = !!(apiKeySubstitute && providerSpecificData?.[apiKeySubstitute]);
-    if (!provider || (!apiKey && provider !== "ollama-local" && !isNoAuth && !hasApiKeySubstitute)) {
+    const isKeyOptional = AI_PROVIDERS[provider]?.keyOptional === true || provider === "ollama-local";
+    if (!provider || (!apiKey && !isKeyOptional && !isNoAuth && !hasApiKeySubstitute)) {
       return NextResponse.json({ error: "Provider and API key required" }, { status: 400 });
     }
 
@@ -395,6 +396,8 @@ export async function POST(request) {
         case "hyperbolic":
         case "ollama":
         case "ollama-local":
+        case "llamacpp":
+        case "vllm":
         case "assemblyai":
         case "nanobanana":
         case "chutes":
@@ -407,6 +410,8 @@ export async function POST(request) {
             ),
             // dynamic URLs (depend on providerSpecificData) — kept inline
             "ollama-local": `${resolveOllamaLocalHost({ providerSpecificData })}/api/tags`,
+            "llamacpp": `${String(providerSpecificData?.baseUrl || "http://localhost:8080").replace(/\/$/, "")}/v1/models`,
+            "vllm": `${String(providerSpecificData?.baseUrl || "http://localhost:8000").replace(/\/$/, "")}/v1/models`,
             "xiaomi-tokenplan": `${resolveXiaomiTokenplanBaseUrl({ providerSpecificData })}/models`,
           };
           const headers = {};

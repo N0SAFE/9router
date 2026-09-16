@@ -29,12 +29,15 @@ export function normalizeProviderSpecificData(provider, body = {}, providerSpeci
     ? { ...providerSpecificData }
     : {};
 
-  if (provider === "ollama-local") {
+  // Keyless local servers accept a custom host so the same provider can point
+  // at remote instances (Ollama, llama.cpp, vLLM).
+  if (provider === "ollama-local" || provider === "llamacpp" || provider === "vllm") {
     const baseUrl = (
       next.baseUrl ||
       body.baseUrl ||
       body.baseURL ||
       body.ollamaHostUrl ||
+      body.serverUrl ||
       ""
     ).trim();
 
