@@ -360,6 +360,24 @@ dashboard-auth endpoints under `/api/local`:
   transport origin (localhost:11434 / 8080 / 8000).
 - `/api/local/*` is dashboard-auth protected; remote callers are subject to
   the same SSRF guard as provider-node validation.
+- `src/lib/local/processManager.js` starts/stops local inference processes
+  (`llama-server -hf …`, `vllm serve …`, `ollama serve`) detached, records pid
+  state and logs to `~/.9router/local/<provider>.*`, validates every argument
+  (shell-safe tokens) and parses vLLM's Prometheus `/metrics` for the UI.
+
+## Dashboard Chat Panel
+
+`/dashboard/basic-chat` (Chat in the sidebar) is a routing-aware chat UI:
+
+- Model/combo picker fed by `GET /api/chat/models` — the same live catalog the
+  API serves (providers, free providers, combos).
+- `POST /api/chat/completions` proxies the body to the internal chat handler
+  with a local API key, streams the response unchanged, and appends a final
+  `event: 9router.routing` block. The trace is looked up by the request body's
+  `metadata.clientRequestId` (newest-rows scan), so timing races are avoided.
+- Each answer renders a routing card (provider, account, combo order, fallback
+  attempts with statuses/actions, TTFT, total latency, tokens) plus a Run
+  Details panel with the raw trace.
 
 ## OAuth Onboarding and Token Refresh Lifecycle
 
