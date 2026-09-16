@@ -255,10 +255,20 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
 
+  // Token-saver stats for the request detail / chat run panel.
+  const tokenSaverStats = {};
+
   // RTK: compress tool_result content
   const rtkStats = compressMessages(translatedBody, tokenSaverEnabled && rtkEnabled);
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);
+  if (rtkStats) {
+    tokenSaverStats.rtk = {
+      bytesBefore: rtkStats.bytesBefore || 0,
+      bytesAfter: rtkStats.bytesAfter || 0,
+      hits: Array.isArray(rtkStats.hits) ? rtkStats.hits.length : 0,
+    };
+  }
 
   // Headroom modes:
   //  - "compress" (default): call /v1/compress, messages only, then send direct.
@@ -279,6 +289,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         log?.warn?.("HEADROOM", `reported token delta, but outbound JSON shrank <5%; provider may bill near-original payload | ${formatHeadroomSizeLog(headroomDiagnostics)}`);
       }
     } else if (tokenSaverEnabled && headroomEnabled) log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
+    if (headroomStats) {
+      tokenSaverStats.headroom = {
+        tokensBefore: headroomStats.tokens_before ?? null,
+        tokensAfter: headroomStats.tokens_after ?? null,
+        tokensSaved: headroomStats.tokens_saved ?? null,
+        mode: "compress",
+      };
+    }
   }
 
   // Token-saver flags accumulator for the single "⚙" log line below.
@@ -307,6 +325,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (pxpipeResult.body) translatedBody = pxpipeResult.body;
     if (pxpipeSummary?.applied) xf.push(`PXPIPE:${pxpipeSummary.imageCount}img`);
     try { onPxpipeEvent?.({ provider, model, ...pxpipeSummary }); } catch { /* stats must not break requests */ }
+    if (pxpipeSummary) {
+      tokenSaverStats.pxpipe = {
+        applied: pxpipeSummary.applied === true,
+        images: pxpipeSummary.imageCount ?? null,
+        bytesBefore: pxpipeSummary.bytesBefore ?? null,
+        bytesAfter: pxpipeSummary.bytesAfter ?? null,
+      };
+    }
   }
 
   if (xf.length && log?.line) log.line(reqTag, "⚙", xf.join(" · "));
@@ -319,7 +345,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Pipeline mode wraps the upstream call so proxyAwareFetch reroutes matching
   // inference requests through Headroom (fail-open to direct on connect error).
   const runExecutor = (args) => headroomPipeline
-    ? runWithHeadroomPipeline({ url: headroomUrl }, () => executor.execute(args))
+    ? runWithHeadroomPipeline(
+        { url: headroomUrl, onStats: (stats) => { pipelineHeadroomStats = stats; } },
+        () => executor.execute(args)
+      )
     : executor.execute(args);
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
@@ -371,6 +400,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Execute request
   let providerResponse, providerUrl, providerHeaders, finalBody;
+  let pipelineHeadroomStats = null;
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
@@ -392,6 +422,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     finalBody = result.transformedBody;
     providerResponseFormat = result.responseFormat || targetFormat;
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+
+    // Pipeline mode: Headroom reports compression per response header.
+    if (pipelineHeadroomStats) {
+      tokenSaverStats.headroom = {
+        tokensBefore: Number.isFinite(pipelineHeadroomStats.tokensBefore) ? pipelineHeadroomStats.tokensBefore : null,
+        tokensAfter: Number.isFinite(pipelineHeadroomStats.tokensAfter) ? pipelineHeadroomStats.tokensAfter : null,
+        tokensSaved: Number.isFinite(pipelineHeadroomStats.tokensSaved) ? pipelineHeadroomStats.tokensSaved : null,
+        mode: "pipeline",
+      };
+    }
+    if (routing && Object.keys(tokenSaverStats).length > 0) {
+      routing.tokenSaver = tokenSaverStats;
+    }
   } catch (error) {
     trackPendingRequest(model, provider, connectionId, false, true);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });

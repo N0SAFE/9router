@@ -49,6 +49,14 @@ async function normalizeProxyPoolId(proxyPoolId) {
 // GET /api/providers - List all connections
 export async function GET() {
   try {
+    // Local tools (Ollama, llama.cpp, vLLM) that are installed or already
+    // listening get a default connection the first time the dashboard loads.
+    try {
+      const { autoProvisionLocalConnections } = await import("@/lib/local/autoProvision");
+      await autoProvisionLocalConnections();
+    } catch {
+      // provisioning is best effort
+    }
     const connections = await getProviderConnections();
 
     // Build nodeNameMap for compatible providers (id → name)

@@ -115,8 +115,8 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
   const refresh = useCallback(async () => {
     try {
       const url = isOllama
-        ? `/api/local/ollama/status?host=${encodeURIComponent(host)}`
-        : `/api/local/server/status?provider=${encodeURIComponent(providerId)}&baseUrl=${encodeURIComponent(host)}`;
+        ? `/api/local/ollama/status?host=${encodeURIComponent(host)}&connectionId=${encodeURIComponent(selectedHost?.id || "")}`
+        : `/api/local/server/status?provider=${encodeURIComponent(providerId)}&baseUrl=${encodeURIComponent(host)}&connectionId=${encodeURIComponent(selectedHost?.id || "")}`;
       const response = await fetch(url, { cache: "no-store" });
       const data = await response.json();
       setStatus(data);

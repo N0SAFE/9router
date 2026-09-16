@@ -12,6 +12,7 @@ export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const host = resolveOllamaBase(request, searchParams.get("host"));
+    const connectionId = searchParams.get("connectionId") || "";
 
     const [version, tags, running] = await Promise.all([
       fetchJsonWithTimeout(`${host}/api/version`),
@@ -20,9 +21,15 @@ export async function GET(request) {
     ]);
 
     const models = Array.isArray(tags?.models) ? tags.models : null;
+    const online = models !== null;
+    if (connectionId) {
+      void import("@/lib/local/autoProvision")
+        .then(({ syncConnectionHealth }) => syncConnectionHealth(connectionId, online))
+        .catch(() => {});
+    }
     return NextResponse.json({
       host,
-      online: models !== null,
+      online,
       version: version?.version || null,
       models: models ?? [],
       running: Array.isArray(running?.models) ? running.models : [],

@@ -308,7 +308,23 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       if (headroomTarget.originalPath) headers["x-headroom-original-path"] = headroomTarget.originalPath;
       dbg("HEADROOM", `pipeline → ${headroomTarget.url} upstream=${headroomTarget.upstreamBaseUrl}`);
       try {
-        return await originalFetch(headroomTarget.url, { ...options, headers });
+        const response = await originalFetch(headroomTarget.url, { ...options, headers });
+        // Headroom reports its per-request compression in response headers;
+        // forward them so the dashboard can show real savings.
+        try {
+          const stats = {
+            tokensBefore: Number(response.headers.get("x-headroom-tokens-before")),
+            tokensAfter: Number(response.headers.get("x-headroom-tokens-after")),
+            tokensSaved: Number(response.headers.get("x-headroom-tokens-saved")),
+            model: response.headers.get("x-headroom-model") || null,
+          };
+          if (Number.isFinite(stats.tokensBefore) || Number.isFinite(stats.tokensSaved)) {
+            headroom.onStats?.(stats);
+          }
+        } catch {
+          // stats are best effort
+        }
+        return response;
       } catch (error) {
         if (!isHeadroomConnectError(error)) throw error;
         dbg("HEADROOM", `pipeline unreachable (${error.cause?.code || error.message}); falling back direct`);

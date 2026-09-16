@@ -65,7 +65,7 @@ export function normalizeHeadroomUrl(url) {
 export function runWithHeadroomPipeline(config, fn) {
   const url = normalizeHeadroomUrl(config?.url);
   if (!url) return fn();
-  return storage.run({ url }, fn);
+  return storage.run({ url, onStats: typeof config?.onStats === "function" ? config.onStats : null }, fn);
 }
 
 /** Active pipeline context, or null outside a wrapped executor call. */
