@@ -1,5 +1,6 @@
 import { buildModelsList } from "../models/route";
 import { getProviderConnections, getSettings } from "@/lib/localDb";
+import { withNoAuthProviders } from "@/lib/providers/noAuthProviders";
 import { bridgeJson, bridgeOptions, buildPoolsPayload } from "@/lib/bridge/discovery";
 
 export async function OPTIONS() {
@@ -17,11 +18,12 @@ export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const includeModels = searchParams.get("models") === "1";
-    const [models, connections, settings] = await Promise.all([
+    const [models, rawConnections, settings] = await Promise.all([
       includeModels ? buildModelsList(["llm"]) : [],
       getProviderConnections().catch(() => []),
       getSettings().catch(() => ({})),
     ]);
+    const connections = withNoAuthProviders(rawConnections);
 
     return bridgeJson({
       object: "list",

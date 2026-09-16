@@ -1,4 +1,5 @@
 import { getCombos, getProviderConnections } from "@/lib/localDb";
+import { withNoAuthProviders } from "@/lib/providers/noAuthProviders";
 import { bridgeJson, bridgeOptions, buildCombosPayload } from "@/lib/bridge/discovery";
 
 export async function OPTIONS() {
@@ -12,10 +13,11 @@ export async function OPTIONS() {
  */
 export async function GET() {
   try {
-    const [combos, connections] = await Promise.all([
+    const [combos, rawConnections] = await Promise.all([
       getCombos().catch(() => []),
       getProviderConnections().catch(() => []),
     ]);
+    const connections = withNoAuthProviders(rawConnections);
 
     return bridgeJson({
       object: "list",

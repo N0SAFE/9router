@@ -85,7 +85,9 @@ export function outputAliasForConnection(connection) {
 }
 
 export function summarizePool(connections, providerId, settings, now = Date.now()) {
-  const pool = activeConnections(connections).filter((conn) => conn.provider === providerId);
+  const pool = activeConnections(connections).filter(
+    (conn) => conn.provider === providerId && !conn.noAuth
+  );
   let cooling = 0;
   let unavailable = 0;
   let locks = 0;
@@ -194,7 +196,9 @@ export function buildPoolsPayload({
     modelCounts.set(model.owned_by, (modelCounts.get(model.owned_by) || 0) + 1);
   }
 
-  return listProviderGroups(connections, settings, now).map((group) => ({
+  return listProviderGroups(connections, settings, now)
+    .filter((group) => group.no_auth !== true)
+    .map((group) => ({
     object: "pool",
     provider: group.id,
     alias: group.alias,
