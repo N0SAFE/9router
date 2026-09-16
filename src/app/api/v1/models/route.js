@@ -18,7 +18,8 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
-import { withNoAuthProviders, fetchNoAuthModels } from "@/lib/providers/noAuthProviders";
+import { withNoAuthProviders } from "@/lib/providers/noAuthProviders";
+import { fetchConnectionModels } from "@/lib/providers/liveModels";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -422,33 +423,16 @@ export async function buildModelsList(kindFilter, options = {}) {
         rawModelIds = await fetchCompatibleModelIds(conn);
       }
 
-      // No-auth providers (e.g. OpenCode Free) can declare a public models
-      // endpoint. Prefer it so free models track upstream, falling back to the
-      // static registry list on failure.
-      const freeFetcher = conn?.noAuth ? conn?.providerSpecificData?.modelsFetcher : null;
-      if (freeFetcher && !hasExplicitEnabledModels && !skipDynamicFetch) {
-        try {
-          const live = await fetchNoAuthModels(freeFetcher);
-          if (live.length > 0) {
-            rawModelIds = live.map((m) => m.id);
-            liveModelKindById = new Map(live.filter((m) => m?.id).map((m) => [m.id, LLM_KIND]));
-            liveNamesById = new Map(
-              live.filter((m) => m?.id).map((m) => [m.id, m.name || m.id])
-            );
-          }
-        } catch (err) {
-          console.log(`Free model fetch failed for ${providerId}: ${err?.message || err}`);
-        }
-      }
-
       // Config-driven live catalog override (e.g. Kiro returns dynamic
       // -thinking/-agentic variants per account). On failure, fall back to
       // whatever rawModelIds already holds.
+      let liveResolverApplied = false;
       const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
       if (liveResolver && !hasExplicitEnabledModels) {
         try {
           const live = await liveResolver(conn);
           if (live?.models?.length) {
+            liveResolverApplied = true;
             rawModelIds = live.models.map((m) => m.id);
             liveModelKindById = new Map(
               live.models
@@ -459,6 +443,25 @@ export async function buildModelsList(kindFilter, options = {}) {
               live.models
                 .filter((m) => m?.id && m.capabilities)
                 .map((m) => [m.id, m.capabilities])
+            );
+          }
+        } catch (err) {
+          console.log(`Live model fetch failed for ${providerId}: ${err?.message || err}`);
+        }
+      }
+
+      // Provider-declared live model list (auth-aware `modelsFetcher`, e.g.
+      // Ollama's account-scoped /api/tags or OpenCode Free's public endpoint).
+      // Prefer it over the static registry list; the static list is the
+      // fallback when the provider does not expose a list or the fetch fails.
+      if (!liveResolverApplied && !hasExplicitEnabledModels && !skipDynamicFetch) {
+        try {
+          const live = await fetchConnectionModels(providerId, conn);
+          if (live.length > 0) {
+            rawModelIds = live.map((m) => m.id);
+            liveModelKindById = new Map(live.filter((m) => m?.id).map((m) => [m.id, LLM_KIND]));
+            liveNamesById = new Map(
+              live.filter((m) => m?.id).map((m) => [m.id, m.name || m.id])
             );
           }
         } catch (err) {

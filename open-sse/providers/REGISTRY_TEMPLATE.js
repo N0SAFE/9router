@@ -52,7 +52,7 @@ export default {
     // quirks: { dropOutputConfig: true },
     // retry: { 429: { attempts: 6 }, 503: { attempts: 3 } },
     // usage: { url: "https://api.example.com/usage" }, // or { urls: [...] } for multi-call.
-    // modelsFetcher: { url: "https://api.example.com/models", type: "openai" }, // dynamic model list.
+    // modelsFetcher: { url: "https://api.example.com/models", type: "openai", auth: "bearer" }, // dynamic model list; auth uses the connection's key (bearer | api-key)
     // regions: { sgp: "https://sgp...", cn: "https://cn..." }, defaultRegion: "sgp",
     // NOTE: clientId/clientSecret/tokenUrl are injected from `oauth` — do NOT duplicate here.
   },

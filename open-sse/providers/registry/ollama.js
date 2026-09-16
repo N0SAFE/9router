@@ -30,6 +30,9 @@ export default {
     { id: "qwen3.5", name: "Qwen3.5" },
     { id: "minimax-m3", name: "MiniMax M3" },
   ],
+  // Live account model list. The static list above is only an offline fallback:
+  // /api/tags is account-scoped and already excludes retired models.
+  modelsFetcher: { url: "https://ollama.com/api/tags", type: "ollama-tags", auth: "bearer" },
   serviceKinds: ["llm", "webFetch"],
   fetchConfig: {
     baseUrl: "https://ollama.com/api/web_fetch",

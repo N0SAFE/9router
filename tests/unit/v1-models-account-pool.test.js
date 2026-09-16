@@ -23,6 +23,11 @@ vi.mock("@/sse/services/tokenRefresh", () => ({
   updateProviderCredentials: vi.fn(),
 }));
 
+// Live provider model lists are network calls; tests use the static fallback.
+vi.mock("@/lib/providers/liveModels", () => ({
+  fetchConnectionModels: vi.fn(async () => []),
+}));
+
 import { buildModelsList } from "@/app/api/v1/models/route.js";
 import { parseModel } from "open-sse/services/model.js";
 
