@@ -54,6 +54,12 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
   const [pull, setPull] = useState(null);
   const [busyModel, setBusyModel] = useState("");
   const [testResult, setTestResult] = useState(null);
+  const [runModel, setRunModel] = useState("");
+  const [runPort, setRunPort] = useState("");
+  const [logs, setLogs] = useState("");
+  const [showLogs, setShowLogs] = useState(false);
+  const [metrics, setMetrics] = useState(null);
+  const [starting, setStarting] = useState(false);
 
   const endpointHost = host || SERVER_DEFAULTS[providerId] || "";
 
@@ -77,6 +83,52 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
   }, [refresh]);
+
+  const refreshLogs = useCallback(async () => {
+    try {
+      const response = await fetch(
+        `/api/local/server/logs?provider=${encodeURIComponent(providerId)}&lines=200`,
+        { cache: "no-store" }
+      );
+      const data = await response.json();
+      setLogs(typeof data.logs === "string" ? data.logs : "");
+    } catch {
+      setLogs("");
+    }
+  }, [providerId]);
+
+  useEffect(() => {
+    if (!showLogs) {
+      return undefined;
+    }
+    // Initial tail; refreshLogs() awaits its fetch before updating state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refreshLogs();
+    const timer = setInterval(refreshLogs, 3000);
+    return () => clearInterval(timer);
+  }, [refreshLogs, showLogs]);
+
+  useEffect(() => {
+    if (providerId !== "vllm") {
+      return undefined;
+    }
+    let cancelled = false;
+    fetch(`/api/local/server/metrics?provider=vllm&baseUrl=${encodeURIComponent(host)}`, { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!cancelled) {
+          setMetrics(data.online ? data.metrics : null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMetrics(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [host, providerId, status?.online]);
 
   useEffect(() => {
     if (!isOllama) {
@@ -241,6 +293,56 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
   const running = Array.isArray(status?.running) ? status.running : [];
   const online = Boolean(status?.online);
   const serverModel = !isOllama && models.length > 0 ? models[0] : null;
+  const processState = status?.process || null;
+  const effectiveModel = runModel || processState?.model || "";
+  const effectivePort = runPort || (processState?.port ? String(processState.port) : "");
+
+  const startServer = useCallback(async () => {
+    setStarting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/local/server/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: providerId,
+          model: isOllama ? undefined : effectiveModel.trim() || undefined,
+          port: /^\d+$/.test(effectivePort) ? Number(effectivePort) : undefined,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to start the server");
+      }
+      setShowLogs(true);
+      await refresh();
+    } catch (err) {
+      setError(String(err?.message || err));
+    } finally {
+      setStarting(false);
+    }
+  }, [effectiveModel, effectivePort, isOllama, providerId, refresh]);
+
+  const stopServer = useCallback(async () => {
+    setStarting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/local/server/status", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to stop the server");
+      }
+      await refresh();
+    } catch (err) {
+      setError(String(err?.message || err));
+    } finally {
+      setStarting(false);
+    }
+  }, [providerId, refresh]);
 
   return (
     <Card>
@@ -336,6 +438,88 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
         </div>
       )}
 
+      <div className="mb-5 rounded-lg border border-border bg-surface-2/40 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm font-medium">Server process</p>
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+              processState?.running
+                ? "bg-green-500/10 text-green-600 dark:text-green-400"
+                : "bg-surface-3 text-text-muted"
+            }`}
+          >
+            {processState?.running ? `running · pid ${processState.pid}` : "stopped"}
+          </span>
+        </div>
+
+        {!isOllama && (
+          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end">
+            <div className="flex-1">
+              <Input
+                label={providerId === "llamacpp" ? "Model (HF repo or .gguf path)" : "Model (Hugging Face id)"}
+                placeholder={providerId === "llamacpp" ? "ggml-org/gemma-3-4b-it-GGUF" : "Qwen/Qwen3-8B"}
+                value={effectiveModel}
+                onChange={(event) => setRunModel(event.target.value)}
+                disabled={Boolean(processState?.running)}
+              />
+            </div>
+            <div className="sm:w-28">
+              <Input
+                label="Port"
+                placeholder={String(SERVER_DEFAULTS[providerId] || "").split(":").pop() || ""}
+                value={effectivePort}
+                onChange={(event) => setRunPort(event.target.value.replace(/[^0-9]/g, ""))}
+                disabled={Boolean(processState?.running)}
+              />
+            </div>
+            {processState?.running ? (
+              <Button variant="danger" icon="stop" loading={starting} onClick={stopServer}>
+                Stop
+              </Button>
+            ) : (
+              <Button icon="play_arrow" loading={starting} disabled={!effectiveModel.trim()} onClick={startServer}>
+                Start
+              </Button>
+            )}
+          </div>
+        )}
+
+        {isOllama && (
+          <div className="mt-2 flex items-center gap-2">
+            {processState?.running ? (
+              <Button size="sm" variant="danger" icon="stop" loading={starting} onClick={stopServer}>
+                Stop ollama serve
+              </Button>
+            ) : (
+              <Button size="sm" icon="play_arrow" loading={starting} onClick={startServer}>
+                Start ollama serve
+              </Button>
+            )}
+          </div>
+        )}
+
+        {processState?.command ? (
+          <p className="mt-2 break-all font-mono text-[11px] text-text-muted">{processState.command}</p>
+        ) : null}
+
+        <div className="mt-2 flex items-center gap-2">
+          <Button size="sm" variant="secondary" icon="article" onClick={() => setShowLogs((value) => !value)}>
+            {showLogs ? "Hide logs" : "Logs"}
+          </Button>
+          {showLogs ? (
+            <Button size="sm" variant="ghost" icon="refresh" onClick={refreshLogs}>
+              Refresh
+            </Button>
+          ) : null}
+        </div>
+
+        {showLogs ? (
+          <pre className="mt-2 max-h-52 overflow-auto rounded-lg border border-border bg-surface-3/60 p-2 font-mono text-[10px] text-text-main">
+            {logs || "No logs yet."}
+          </pre>
+        ) : null}
+      </div>
+
       {!isOllama && online && serverModel && (
         <div className="mb-5 rounded-lg border border-border bg-surface-2/40 p-3 text-sm">
           <p>
@@ -346,8 +530,25 @@ export default function LocalModelsPanel({ providerId, host = "" }) {
         </div>
       )}
 
-      {!isOllama && !serverModel && online && (
-        <p className="mb-5 text-sm text-text-muted">Server is running but reports no loaded model.</p>
+      {providerId === "vllm" && metrics && (
+        <div className="mb-5 grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {[
+            ["Running requests", metrics.requestsRunning],
+            ["Waiting requests", metrics.requestsWaiting],
+            ["GPU cache", metrics.gpuCacheUsage != null ? `${(metrics.gpuCacheUsage * 100).toFixed(1)}%` : null],
+            ["Prompt tokens", metrics.promptTokensTotal],
+            ["Generated tokens", metrics.generationTokensTotal],
+          ]
+            .filter(([, value]) => value != null)
+            .map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-border bg-surface-2/50 p-2">
+                <p className="text-xs text-text-muted">{label}</p>
+                <p className="text-sm font-semibold">
+                  {typeof value === "number" ? value.toLocaleString() : value}
+                </p>
+              </div>
+            ))}
+        </div>
       )}
 
       {isOllama && running.length > 0 && (

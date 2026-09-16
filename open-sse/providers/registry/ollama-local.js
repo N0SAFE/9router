@@ -15,8 +15,8 @@ export default {
   },
   category: "apikey",
   transport: {
-    baseUrl: "http://localhost:11434/api/chat",
-    format: "ollama",
+    baseUrl: "http://localhost:11434/v1/chat/completions",
+    format: "openai",
   },
   serviceKinds: ["llm"],
   models: [],

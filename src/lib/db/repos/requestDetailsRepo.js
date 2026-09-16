@@ -143,8 +143,6 @@ async function flushToDatabase() {
 }
 
 export async function saveRequestDetail(detail) {
-  const config = await getObservabilityConfig();
-  if (!config.enabled) {return;}
 
   writeBuffer.push(detail);
 
@@ -226,6 +224,44 @@ export async function getRequestDetailById(id) {
   const db = await getAdapter();
   const row = db.get(`SELECT data FROM requestDetails WHERE id = ?`, [id]);
   return row ? parseJson(row.data, null) : null;
+}
+
+/**
+ * Last detail pushed through saveRequestDetail (in-memory). The dashboard chat
+ * proxy uses it to append the routing trace to the stream it just finished.
+ * `sinceMs` guards against returning a detail from a previous request.
+ */
+export function getLastRequestDetail(sinceMs = 0) {
+  const entry = global._lastRequestDetail;
+  if (!entry?.detail) {
+    return null;
+  }
+  if (sinceMs && entry.savedAt < sinceMs) {
+    return null;
+  }
+  return entry.detail;
+}
+
+/**
+ * Find the stored detail for a dashboard chat request by its client request id
+ * (sent in the request body's `metadata`). Scans only the newest rows.
+ */
+export async function getRequestDetailByClientRequestId(clientRequestId, limit = 50) {
+  if (!clientRequestId) {
+    return null;
+  }
+  const db = await getAdapter();
+  const rows = db.all(
+    `SELECT data FROM requestDetails ORDER BY timestamp DESC LIMIT ?`,
+    [limit]
+  );
+  for (const row of rows) {
+    const detail = parseJson(row.data, null);
+    if (detail?.request?.metadata?.clientRequestId === clientRequestId) {
+      return detail;
+    }
+  }
+  return null;
 }
 
 const _shutdownHandler = async () => {

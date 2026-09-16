@@ -1,967 +1,724 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Badge, Button } from "@/shared/components";
-import { getModelsByProviderId } from "@/shared/constants/models";
-import { isAnthropicCompatibleProvider, isOpenAICompatibleProvider } from "@/shared/constants/providers";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button, Input } from "@/shared/components";
+import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
-const STORAGE_KEYS = {
-  sessions: "basic-chat.sessions",
-  activeSessionId: "basic-chat.activeSessionId",
-  activeProviderId: "basic-chat.activeProviderId",
-  draft: "basic-chat.draft",
-};
+const STORAGE_KEY = "basic-chat.sessions.v2";
+const ACTIVE_KEY = "basic-chat.active.v2";
 
 function createId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
   return `chat_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function safeParse(value, fallback) {
+function loadSessions() {
   try {
-    return JSON.parse(value);
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return fallback;
+    return [];
   }
 }
 
-function textValue(value) {
-  if (typeof value === "string") return value;
-  if (value == null) return "";
-  if (Array.isArray(value)) return value.map(textValue).filter(Boolean).join(" ");
-  if (typeof value === "object") {
-    if (typeof value.message === "string") return value.message;
-    if (typeof value.error === "string") return value.error;
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return String(value);
+function shortId(value) {
+  return typeof value === "string" && value.length > 10 ? value.slice(0, 8) : value || "—";
+}
+
+function formatMs(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "—";
+  }
+  return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${value}ms`;
+}
+
+function formatNumber(value) {
+  return Number.isFinite(value) ? value.toLocaleString() : "—";
+}
+
+function modelLabel(model) {
+  if (model.kind === "combo") {
+    return model.id;
+  }
+  const bare = String(model.id).includes("/") ? String(model.id).slice(String(model.id).indexOf("/") + 1) : model.id;
+  return model.name && model.name !== model.id ? model.name : bare;
+}
+
+const ROUTING_ACTIONS = {
+  fallback: { label: "fallback", className: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
+  capability: { label: "capability", className: "bg-purple-500/10 text-purple-600 dark:text-purple-400" },
+  "non-fallback": { label: "returned", className: "bg-red-500/10 text-red-600 dark:text-red-400" },
+  cooldown: { label: "cooldown", className: "bg-amber-500/10 text-amber-600 dark:text-amber-400" },
+};
+
+/** Minimal, XSS-safe markdown renderer (code fences, headings, lists, inline marks). */
+function renderInline(text, keyPrefix) {
+  const nodes = [];
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g;
+  let lastIndex = 0;
+  let match;
+  let index = 0;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
     }
-  }
-  return String(value);
-}
-
-function humanize(value = "") {
-  return String(value)
-    .replace(/[-_]/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase())
-    .trim() || "Unknown";
-}
-
-function formatRelativeTime(value) {
-  if (!value) return "Now";
-  const time = new Date(value).getTime();
-  if (Number.isNaN(time)) return "Now";
-  const diffMinutes = Math.max(1, Math.round((Date.now() - time) / 60000));
-  if (diffMinutes < 60) return `${diffMinutes}m`;
-  const diffHours = Math.round(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours}h`;
-  return `${Math.round(diffHours / 24)}d`;
-}
-
-function makeSessionTitle(text = "") {
-  const normalized = textValue(text).replace(/\s+/g, " ").trim();
-  if (!normalized) return "New chat";
-  return normalized.length > 52 ? `${normalized.slice(0, 52).trimEnd()}…` : normalized;
-}
-
-function buildUserContent(message) {
-  const text = textValue(message.content).trim();
-  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
-
-  if (attachments.length === 0) return text;
-
-  const content = [];
-  if (text) content.push({ type: "text", text });
-
-  for (const attachment of attachments) {
-    if (attachment?.dataUrl) {
-      content.push({ type: "image_url", image_url: { url: attachment.dataUrl } });
+    const token = match[0];
+    const key = `${keyPrefix}-i${index++}`;
+    if (token.startsWith("`")) {
+      nodes.push(
+        <code key={key} className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[0.85em] text-brand-500">
+          {token.slice(1, -1)}
+        </code>
+      );
+    } else if (token.startsWith("**")) {
+      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith("*")) {
+      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
+    } else {
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (linkMatch && /^https?:\/\//i.test(linkMatch[2])) {
+        nodes.push(
+          <a key={key} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" className="text-brand-500 underline">
+            {linkMatch[1]}
+          </a>
+        );
+      } else {
+        nodes.push(token);
+      }
     }
+    lastIndex = match.index + token.length;
   }
-
-  return content.length > 0 ? content : text;
-}
-
-function readAssistantText(chunk) {
-  if (!chunk || typeof chunk !== "object") return "";
-  const choice = chunk.choices?.[0];
-  const delta = choice?.delta || {};
-  const pieces = [delta.content, choice?.message?.content, chunk.output_text, chunk.text]
-    .map(textValue)
-    .filter(Boolean);
-  return pieces[0] || "";
-}
-
-async function fileToDataUrl(file) {
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function cloneSession(session) {
-  return {
-    ...session,
-    messages: Array.isArray(session.messages) ? session.messages.map((message) => ({ ...message })) : [],
-  };
-}
-
-function getProviderLabel(connection) {
-  return connection?.name || humanize(connection?.provider || connection?.id || "provider");
-}
-
-function normalizeStaticModel(model, connection) {
-  if (!model?.id) return null;
-  return {
-    id: `${connection.provider}/${model.id}`,
-    requestModel: `${connection.provider}/${model.id}`,
-    name: model.name || model.id,
-    providerId: connection.provider,
-    providerName: getProviderLabel(connection),
-    source: "static",
-  };
-}
-
-function normalizeLiveModel(model, connection) {
-  const rawId = typeof model === "string" ? model : model?.id || model?.name || model?.model || "";
-  if (!rawId) return null;
-
-  const displayName = typeof model === "string"
-    ? model
-    : model?.name || model?.displayName || rawId;
-
-  let requestModel = rawId;
-  const isCompatible = isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider);
-  if (isCompatible && !rawId.includes("/")) {
-    requestModel = `${connection.provider}/${rawId}`;
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
   }
-
-  return {
-    id: requestModel,
-    requestModel,
-    name: displayName,
-    providerId: connection.provider,
-    providerName: getProviderLabel(connection),
-    source: "live",
-  };
+  return nodes;
 }
 
-function parseProviderModelsPayload(data) {
-  if (Array.isArray(data?.models)) return data.models;
-  if (Array.isArray(data?.data)) return data.data;
-  if (Array.isArray(data?.results)) return data.results;
-  if (Array.isArray(data)) return data;
-  return [];
+function Markdown({ text }) {
+  const blocks = useMemo(() => {
+    const result = [];
+    const fence = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
+    let lastIndex = 0;
+    let match;
+    let index = 0;
+    while ((match = fence.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        result.push({ type: "text", value: text.slice(lastIndex, match.index), key: `t${index++}` });
+      }
+      result.push({ type: "code", language: match[1], value: match[2], key: `c${index++}` });
+      lastIndex = match.index + match[0].length;
+    }
+    if (lastIndex < text.length) {
+      result.push({ type: "text", value: text.slice(lastIndex), key: `t${index++}` });
+    }
+    return result;
+  }, [text]);
+
+  return (
+    <div className="flex flex-col gap-2 text-sm leading-relaxed">
+      {blocks.map((block) => {
+        if (block.type === "code") {
+          return (
+            <div key={block.key} className="overflow-hidden rounded-lg border border-border bg-surface-3/60">
+              {block.language ? (
+                <div className="border-b border-border px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
+                  {block.language}
+                </div>
+              ) : null}
+              <pre className="overflow-x-auto p-3 font-mono text-xs text-text-main">
+                <code>{block.value.trimEnd()}</code>
+              </pre>
+            </div>
+          );
+        }
+        return (
+          <div key={block.key} className="flex flex-col gap-1.5">
+            {block.value.split("\n").map((line, lineIndex) => {
+              const trimmed = line.trim();
+              if (!trimmed) {
+                return <span key={lineIndex} className="h-1" />;
+              }
+              if (/^#{1,3}\s/.test(trimmed)) {
+                const level = trimmed.match(/^#+/)[0].length;
+                const content = trimmed.replace(/^#+\s/, "");
+                return (
+                  <p key={lineIndex} className={level === 1 ? "text-base font-semibold" : "text-sm font-semibold"}>
+                    {renderInline(content, `${block.key}-h${lineIndex}`)}
+                  </p>
+                );
+              }
+              if (/^[-*]\s/.test(trimmed)) {
+                return (
+                  <div key={lineIndex} className="flex gap-2 pl-1">
+                    <span className="text-brand-500">•</span>
+                    <span>{renderInline(trimmed.replace(/^[-*]\s/, ""), `${block.key}-l${lineIndex}`)}</span>
+                  </div>
+                );
+              }
+              return <p key={lineIndex}>{renderInline(line, `${block.key}-p${lineIndex}`)}</p>;
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
-function dedupeModels(models) {
-  const map = new Map();
-  for (const model of models) {
-    if (!model?.id) continue;
-    if (!map.has(model.id)) map.set(model.id, model);
+function Chip({ children, className = "" }) {
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${className || "bg-surface-3 text-text-muted"}`}>
+      {children}
+    </span>
+  );
+}
+
+function RoutingCard({ routing, latency, tokens, provider, model, connectionId, status }) {
+  if (!routing && !tokens && !latency) {
+    return null;
   }
-  return Array.from(map.values());
+  const combo = routing?.combo;
+  const attempts = Array.isArray(routing?.attempts) ? routing.attempts : [];
+  const selected = routing?.selected;
+
+  return (
+    <div className="mt-3 flex flex-col gap-2 rounded-xl border border-border bg-surface-2/50 p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Chip className={status === "success" ? "bg-green-500/10 text-green-600 dark:text-green-400" : "bg-red-500/10 text-red-600 dark:text-red-400"}>
+          <span className={`h-1.5 w-1.5 rounded-full ${status === "success" ? "bg-green-500" : "bg-red-500"}`} />
+          {status || "done"}
+        </Chip>
+        {combo ? (
+          <Chip className="bg-brand-500/10 text-brand-500">combo · {combo.name}</Chip>
+        ) : (
+          <Chip>single model</Chip>
+        )}
+        <Chip>{provider || "—"}</Chip>
+        <Chip>{model || "—"}</Chip>
+        {selected?.reason ? <Chip className="bg-blue-500/10 text-blue-600 dark:text-blue-400">pick: {selected.reason}</Chip> : null}
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-text-muted sm:grid-cols-4">
+        <span>
+          Account <span className="text-text-main">{selected?.name || shortId(connectionId)}</span>
+        </span>
+        <span>
+          TTFT <span className="text-text-main">{formatMs(latency?.ttft)}</span>
+        </span>
+        <span>
+          Total <span className="text-text-main">{formatMs(latency?.total)}</span>
+        </span>
+        <span>
+          Tokens <span className="text-text-main">{formatNumber(tokens?.prompt_tokens ?? tokens?.input_tokens)}→{formatNumber(tokens?.completion_tokens ?? tokens?.output_tokens)}</span>
+        </span>
+      </div>
+
+      {combo?.models?.length ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-text-muted">combo order:</span>
+          {combo.models.map((entry, index) => (
+            <Chip
+              key={`${entry.model}-${index}`}
+              className={
+                entry.status === "success"
+                  ? "bg-green-500/10 text-green-600 dark:text-green-400"
+                  : String(entry.status).startsWith("failed")
+                    ? "bg-red-500/10 text-red-600 dark:text-red-400"
+                    : "bg-surface-3 text-text-muted"
+              }
+            >
+              {entry.model} · {entry.status}
+            </Chip>
+          ))}
+        </div>
+      ) : null}
+
+      {attempts.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          {attempts.map((attempt, index) => (
+            <div key={`${attempt.connectionId}-${index}`} className="flex flex-wrap items-center gap-1.5">
+              <span className="text-text-muted">#{index + 1}</span>
+              <span>{attempt.name || shortId(attempt.connectionId)}</span>
+              {attempt.status ? <Chip className="bg-surface-3">HTTP {attempt.status}</Chip> : null}
+              {attempt.action ? (
+                <Chip className={ROUTING_ACTIONS[attempt.action]?.className || "bg-surface-3 text-text-muted"}>
+                  {ROUTING_ACTIONS[attempt.action]?.label || attempt.action}
+                </Chip>
+              ) : null}
+              {attempt.cooldownMs ? <span className="text-text-muted">cooldown {formatMs(attempt.cooldownMs)}</span> : null}
+              {attempt.error ? <span className="truncate text-red-500/80">{String(attempt.error).slice(0, 80)}</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export default function BasicChatPageClient() {
-  const [providerGroups, setProviderGroups] = useState([]);
-  const [loadingData, setLoadingData] = useState(true);
-  const [loadError, setLoadError] = useState("");
-  const [sessions, setSessions] = useState(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const saved = safeParse(globalThis.localStorage.getItem(STORAGE_KEYS.sessions), []);
-      return Array.isArray(saved) ? saved.map((session) => ({
-        ...session,
-        messages: Array.isArray(session.messages) ? session.messages : [],
-      })) : [];
-    } catch { return []; }
-  });
-  const [activeSessionId, setActiveSessionId] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return globalThis.localStorage.getItem(STORAGE_KEYS.activeSessionId) || "";
-  });
-  const [activeProviderId, setActiveProviderId] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return globalThis.localStorage.getItem(STORAGE_KEYS.activeProviderId) || "";
-  });
-  const [activeModelId, setActiveModelId] = useState("");
-  const [draft, setDraft] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return globalThis.localStorage.getItem(STORAGE_KEYS.draft) || "";
-  });
-  const [attachments, setAttachments] = useState([]);
-  const [isSending, setIsSending] = useState(false);
-  const [streamingMessageId, setStreamingMessageId] = useState("");
-  const [streamingText, setStreamingText] = useState("");
-  const [isHydrated, setIsHydrated] = useState(false);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const fileInputRef = useRef(null);
+  const [models, setModels] = useState([]);
+  const [modelId, setModelId] = useState("");
+  const [modelSearch, setModelSearch] = useState("");
+  const [sessions, setSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState("");
+  const [input, setInput] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState("");
+  const [showModels, setShowModels] = useState(false);
+  const [detailMessageId, setDetailMessageId] = useState("");
   const abortRef = useRef(null);
-  const initializedRef = useRef(false);
-  const modelMenuRef = useRef(null);
-  const historyMenuRef = useRef(null);
+  const scrollRef = useRef(null);
+  const { copy } = useCopyToClipboard();
+
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId) || null,
+    [sessions, activeSessionId]
+  );
+  const messages = useMemo(() => activeSession?.messages || [], [activeSession]);
 
   useEffect(() => {
-    setIsHydrated(true);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadData() {
-      setLoadingData(true);
-      setLoadError("");
-
-      try {
-        const providersRes = await fetch("/api/providers", { cache: "no-store" });
-        const providersData = await providersRes.json().catch(() => ({}));
-        const connections = Array.isArray(providersData.connections)
-          ? providersData.connections.filter((connection) => connection?.isActive !== false)
-          : [];
-
-        if (connections.length === 0) {
-          if (!cancelled) {
-            setProviderGroups([]);
-            setLoadError("No providers connected yet.");
-          }
-          return;
-        }
-
-        const providerMap = new Map();
-
-        for (const connection of connections) {
-          const providerId = connection.provider || connection.id;
-          const providerName = getProviderLabel(connection);
-          const providerType = isOpenAICompatibleProvider(providerId)
-            ? "openai-compatible"
-            : isAnthropicCompatibleProvider(providerId)
-              ? "anthropic-compatible"
-              : providerId;
-
-          if (!providerMap.has(providerId)) {
-            providerMap.set(providerId, {
-              providerId,
-              providerName,
-              providerType,
-              connections: [],
-              models: [],
-            });
-          }
-
-          const group = providerMap.get(providerId);
-          group.providerName = group.providerName || providerName;
-          group.providerType = group.providerType || providerType;
-          group.connections.push(connection);
-
-          const staticModels = getModelsByProviderId(providerId)
-            .map((model) => normalizeStaticModel(model, connection))
-            .filter(Boolean);
-          group.models.push(...staticModels);
-        }
-
-        const liveResults = await Promise.all(
-          connections.map(async (connection) => {
-            try {
-              const response = await fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" });
-              const data = await response.json().catch(() => ({}));
-              if (!response.ok) return { connection, models: [] };
-              const models = parseProviderModelsPayload(data)
-                .map((model) => normalizeLiveModel(model, connection))
-                .filter(Boolean);
-              return { connection, models };
-            } catch {
-              return { connection, models: [] };
-            }
-          })
-        );
-
-        for (const result of liveResults) {
-          const providerId = result.connection.provider || result.connection.id;
-          const group = providerMap.get(providerId);
-          if (!group) continue;
-          group.models.push(...result.models);
-        }
-
-        const normalized = Array.from(providerMap.values())
-          .map((group) => ({
-            ...group,
-            models: dedupeModels(group.models).sort((a, b) => a.name.localeCompare(b.name)),
-          }))
-          .filter((group) => group.models.length > 0)
-          .sort((a, b) => a.providerName.localeCompare(b.providerName));
-
-        if (!cancelled) {
-          setProviderGroups(normalized);
-          if (normalized.length === 0) {
-            setLoadError("Providers connected but no models available.");
-          }
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setLoadError(textValue(error?.message) || "Failed to load providers/models.");
-          setProviderGroups([]);
-        }
-      } finally {
-        if (!cancelled) setLoadingData(false);
-      }
+    setSessions(loadSessions());
+    const storedActive = localStorage.getItem(ACTIVE_KEY);
+    if (storedActive) {
+      setActiveSessionId(storedActive);
     }
-
-    loadData();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (modelMenuRef.current && !modelMenuRef.current.contains(event.target)) {
-        setModelMenuOpen(false);
-      }
-      if (historyMenuRef.current && !historyMenuRef.current.contains(event.target)) {
-        setHistoryOpen(false);
-      }
-    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+  }, [sessions]);
 
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+  useEffect(() => {
+    if (activeSessionId) {
+      localStorage.setItem(ACTIVE_KEY, activeSessionId);
+    }
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    fetch("/api/chat/models", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data) => {
+        const list = Array.isArray(data.data) ? data.data : [];
+        setModels(list);
+        if (!modelId && list.length > 0) {
+          setModelId(list[0].id);
+        }
+      })
+      .catch(() => setModels([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const modelIndex = useMemo(() => {
-    const map = new Map();
-    for (const group of providerGroups) {
-      for (const model of group.models) {
-        map.set(model.id, {
-          ...model,
-          providerId: group.providerId,
-          providerName: group.providerName,
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, streaming]);
+
+  const groupedModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+    const groups = new Map();
+    for (const model of models) {
+      if (query && !String(model.id).toLowerCase().includes(query) && !String(model.name || "").toLowerCase().includes(query)) {
+        continue;
+      }
+      const key = model.kind === "combo" ? "combo" : model.owned_by || "other";
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          label: model.kind === "combo" ? "Combos" : model.provider_name || key,
+          color: model.color || null,
+          textIcon: model.text_icon || (model.kind === "combo" ? "CO" : "?"),
+          isCombo: model.kind === "combo",
+          models: [],
         });
       }
+      groups.get(key).models.push(model);
     }
-    return map;
-  }, [providerGroups]);
+    return [...groups.values()].sort((a, b) => {
+      if (a.isCombo !== b.isCombo) {
+        return a.isCombo ? -1 : 1;
+      }
+      return a.label.localeCompare(b.label);
+    });
+  }, [models, modelSearch]);
 
-  const activeProviderGroup = useMemo(() => {
-    return providerGroups.find((group) => group.providerId === activeProviderId) || providerGroups[0] || null;
-  }, [providerGroups, activeProviderId]);
+  const activeModel = useMemo(() => models.find((model) => model.id === modelId) || null, [models, modelId]);
 
-  const activeModel = useMemo(() => {
-    if (activeModelId && modelIndex.has(activeModelId)) return modelIndex.get(activeModelId);
-    if (activeSessionId) {
-      const session = sessions.find((item) => item.id === activeSessionId);
-      if (session?.modelId && modelIndex.has(session.modelId)) return modelIndex.get(session.modelId);
-    }
-    return activeProviderGroup?.models?.[0] || null;
-  }, [activeModelId, modelIndex, activeProviderGroup, sessions, activeSessionId]);
-
-  const currentSession = useMemo(() => sessions.find((session) => session.id === activeSessionId) || null, [sessions, activeSessionId]);
-  const currentMessages = currentSession?.messages || [];
-  const sessionItems = useMemo(() => [...sessions].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()), [sessions]);
-  const canSend = !isSending && !!activeModel && (draft.trim().length > 0 || attachments.length > 0);
-
-  useEffect(() => {
-    if (!isHydrated) return;
-    try {
-      globalThis.localStorage.setItem(STORAGE_KEYS.sessions, JSON.stringify(sessions));
-      globalThis.localStorage.setItem(STORAGE_KEYS.activeSessionId, activeSessionId);
-      globalThis.localStorage.setItem(STORAGE_KEYS.activeProviderId, activeProviderId);
-      globalThis.localStorage.setItem(STORAGE_KEYS.draft, draft);
-    } catch {
-      // Ignore storage errors.
-    }
-  }, [isHydrated, sessions, activeSessionId, activeProviderId, draft]);
-
-  useEffect(() => {
-    if (!isHydrated || loadingData || initializedRef.current) return;
-    if (providerGroups.length === 0) return;
-
-    const savedProvider = providerGroups.find((group) => group.providerId === activeProviderId) || providerGroups[0];
-    const savedModel = activeModelId && modelIndex.has(activeModelId)
-      ? modelIndex.get(activeModelId)
-      : savedProvider.models[0];
-
-    if (sessions.length > 0) {
-      const session = sessions.find((item) => item.id === activeSessionId) || sessions[0];
-      const sessionModel = session?.modelId && modelIndex.has(session.modelId)
-        ? modelIndex.get(session.modelId)
-        : savedModel;
-      initializedRef.current = true;
-      setActiveSessionId(session.id);
-      setActiveProviderId(sessionModel?.providerId || savedProvider.providerId);
-      setActiveModelId(sessionModel?.id || savedModel.id);
-      return;
-    }
-
+  const createSession = useCallback(() => {
     const session = {
       id: createId(),
       title: "New chat",
-      providerId: savedProvider.providerId,
-      providerName: savedProvider.providerName,
-      modelId: savedModel.id,
-      modelName: savedModel.name,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      model: modelId,
+      createdAt: Date.now(),
       messages: [],
     };
-
-    initializedRef.current = true;
-    setSessions([session]);
+    setSessions((previous) => [session, ...previous]);
     setActiveSessionId(session.id);
-    setActiveProviderId(savedProvider.providerId);
-    setActiveModelId(savedModel.id);
-  }, [isHydrated, loadingData, providerGroups, modelIndex, sessions, activeSessionId, activeProviderId, activeModelId]);
+    setError("");
+    return session;
+  }, [modelId]);
 
-  const updateSession = (sessionId, updater) => {
-    setSessions((prev) => prev.map((session) => (session.id === sessionId ? updater(cloneSession(session)) : session)));
-  };
-
-  const ensureSessionForModel = (model) => {
-    if (!model) return null;
-    return {
-      id: createId(),
-      title: "New chat",
-      providerId: model.providerId,
-      providerName: model.providerName,
-      modelId: model.id,
-      modelName: model.name,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      messages: [],
-    };
-  };
-
-  const handleNewChat = () => {
-    if (!activeModel) return;
-    const session = ensureSessionForModel(activeModel);
-    if (!session) return;
-    setSessions((prev) => [session, ...prev]);
-    setActiveSessionId(session.id);
-    setActiveProviderId(session.providerId);
-    setActiveModelId(session.modelId);
-    setDraft("");
-    setAttachments([]);
-    setStreamingMessageId("");
-    setStreamingText("");
-  };
-
-  const handleSelectSession = (sessionId) => {
-    const session = sessions.find((item) => item.id === sessionId);
-    if (!session) return;
-    setActiveSessionId(sessionId);
-    setActiveProviderId(session.providerId || activeProviderId);
-    setActiveModelId(session.modelId || activeModelId);
-    setHistoryOpen(false);
-  };
-
-  const handleDeleteCurrentChat = () => {
-    if (!activeSessionId) return;
-    const nextSessions = sessions.filter((session) => session.id !== activeSessionId);
-    const fallback = nextSessions[0] || null;
-    setSessions(nextSessions);
-    if (fallback) {
-      setActiveSessionId(fallback.id);
-      setActiveProviderId(fallback.providerId);
-      setActiveModelId(fallback.modelId);
-    } else {
-      setActiveSessionId("");
-      setActiveProviderId("");
-      setActiveModelId("");
+  const ensureSession = useCallback(() => {
+    if (activeSession) {
+      return activeSession;
     }
-  };
+    return createSession();
+  }, [activeSession, createSession]);
 
-  const handleSelectProvider = (providerId) => {
-    const group = providerGroups.find((item) => item.providerId === providerId);
-    if (!group || group.models.length === 0) return;
-    const nextModel = group.models[0];
+  const updateSession = useCallback((sessionId, updater) => {
+    setSessions((previous) =>
+      previous.map((session) => {
+        if (session.id !== sessionId) {
+          return session;
+        }
+        const next = typeof updater === "function" ? updater(session) : { ...session, ...updater };
+        return next;
+      })
+    );
+  }, []);
 
-    const current = sessions.find((session) => session.id === activeSessionId);
-    if (current && current.messages.length > 0) {
-      const session = ensureSessionForModel(nextModel);
-      if (!session) return;
-      setSessions((prev) => [session, ...prev]);
-      setActiveSessionId(session.id);
-    } else if (current) {
-      setSessions((prev) => prev.map((item) => (item.id === current.id ? {
-        ...item,
-        providerId: group.providerId,
-        providerName: group.providerName,
-        modelId: nextModel.id,
-        modelName: nextModel.name,
-      } : item)));
-      setActiveSessionId(current.id);
-    }
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+  }, []);
 
-    setActiveProviderId(group.providerId);
-    setActiveModelId(nextModel.id);
-    setModelMenuOpen(false);
-  };
-
-  const handleSelectModel = (modelId) => {
-    const model = modelIndex.get(modelId);
-    if (!model) return;
-
-    const current = sessions.find((session) => session.id === activeSessionId);
-    if (current && current.messages.length > 0) {
-      const session = ensureSessionForModel(model);
-      if (!session) return;
-      setSessions((prev) => [session, ...prev]);
-      setActiveSessionId(session.id);
-    } else if (current) {
-      setSessions((prev) => prev.map((item) => (item.id === current.id ? {
-        ...item,
-        providerId: model.providerId,
-        providerName: model.providerName,
-        modelId: model.id,
-        modelName: model.name,
-      } : item)));
-      setActiveSessionId(current.id);
-    } else {
-      const session = ensureSessionForModel(model);
-      if (!session) return;
-      setSessions((prev) => [session, ...prev]);
-      setActiveSessionId(session.id);
-    }
-
-    setActiveProviderId(model.providerId);
-    setActiveModelId(model.id);
-    setModelMenuOpen(false);
-  };
-
-  const handleAttachFiles = async (event) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
-
-    const images = files.filter((file) => file.type.startsWith("image/"));
-    if (images.length === 0) {
-      event.target.value = "";
+  const send = useCallback(async () => {
+    const text = input.trim();
+    if (!text || streaming) {
       return;
     }
+    const session = ensureSession();
+    const userMessage = { id: createId(), role: "user", content: text, ts: Date.now() };
+    const assistantId = createId();
+    const assistantMessage = { id: assistantId, role: "assistant", content: "", streaming: true, ts: Date.now() };
+    const history = [...(session.messages || []), userMessage];
 
-    const converted = await Promise.all(images.map(async (file) => ({
-      id: createId(),
-      name: file.name,
-      type: file.type,
-      size: file.size,
-      dataUrl: await fileToDataUrl(file),
-    })));
+    updateSession(session.id, {
+      title: session.messages.length === 0 ? text.slice(0, 48) : session.title,
+      model: modelId,
+      messages: [...history, assistantMessage],
+    });
+    setInput("");
+    setError("");
+    setStreaming(true);
+    setDetailMessageId(assistantId);
 
-    setAttachments((prev) => [...prev, ...converted]);
-    event.target.value = "";
-  };
-
-  const removeAttachment = (attachmentId) => {
-    setAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
-  };
-
-  const handleStop = () => {
-    abortRef.current?.abort();
-  };
-
-  const finalizeSessionTitle = (sessionId, titleSeed) => {
-    const title = makeSessionTitle(titleSeed);
-    updateSession(sessionId, (session) => ({
-      ...session,
-      title: session.title === "New chat" ? title : session.title,
-      updatedAt: new Date().toISOString(),
-    }));
-  };
-
-  const sendMessage = async () => {
-    const model = activeModel || activeProviderGroup?.models?.[0] || null;
-    if (!model) return;
-
-    const userText = draft.trim();
-    if (!userText && attachments.length === 0) return;
-
-    let sessionId = activeSessionId;
-    let session = sessions.find((item) => item.id === sessionId);
-    if (!session) {
-      session = ensureSessionForModel(model);
-      if (!session) return;
-      sessionId = session.id;
-      setSessions((prev) => [session, ...prev]);
-      setActiveSessionId(sessionId);
-    }
-
-    const userMessage = {
-      id: createId(),
-      role: "user",
-      content: userText,
-      attachments: attachments.map((attachment) => ({
-        id: attachment.id,
-        name: attachment.name,
-        type: attachment.type,
-        dataUrl: attachment.dataUrl,
-      })),
-      createdAt: new Date().toISOString(),
-    };
-
-    const assistantMessageId = createId();
-    const assistantMessage = {
-      id: assistantMessageId,
-      role: "assistant",
-      content: "",
-      createdAt: new Date().toISOString(),
-      status: "streaming",
-    };
-
-    const nextMessages = [...(session.messages || []), userMessage, assistantMessage];
-    setSessions((prev) => prev.map((item) => (item.id === sessionId ? {
-      ...item,
-      providerId: model.providerId,
-      providerName: model.providerName,
-      modelId: model.id,
-      modelName: model.name,
-      messages: nextMessages,
-      updatedAt: new Date().toISOString(),
-      title: item.title === "New chat" ? makeSessionTitle(userText) : item.title,
-    } : item)));
-    setDraft("");
-    setAttachments([]);
-    setIsSending(true);
-    setStreamingMessageId(assistantMessageId);
-    setStreamingText("");
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
-
-    const requestMessages = nextMessages
-      .filter((message) => !(message.role === "assistant" && message.id === assistantMessageId))
-      .map((message) => ({
-        role: message.role,
-        content: message.role === "user" ? buildUserContent(message) : message.content,
-      }));
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const clientRequestId = createId();
 
     try {
-      const response = await fetch("/api/dashboard/chat/completions", {
+      const response = await fetch("/api/chat/completions", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
-          model: model.requestModel || model.id,
-          messages: requestMessages,
+          model: modelId,
+          messages: history.map((message) => ({ role: message.role, content: message.content })),
           stream: true,
+          metadata: { clientRequestId },
         }),
-        signal: abortRef.current.signal,
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(textValue(errorData.error || errorData.message || `Request failed (${response.status})`));
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
+      if (!response.ok || !response.body) {
         const data = await response.json().catch(() => ({}));
-        const fallbackText = textValue(data?.choices?.[0]?.message?.content || data?.output_text || data?.error || data?.message || "");
-        updateSession(sessionId, (currentSession) => ({
-          ...currentSession,
-          messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: fallbackText, status: "done" } : message)),
-          updatedAt: new Date().toISOString(),
-        }));
-        return;
+        throw new Error(data.error || `Request failed (${response.status})`);
       }
 
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let currentEvent = "";
       let assistantText = "";
+      let routing = null;
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
+      const applyStreaming = () => {
+        updateSession(session.id, (current) => ({
+          ...current,
+          messages: current.messages.map((message) =>
+            message.id === assistantId ? { ...message, content: assistantText, routing } : message
+          ),
+        }));
+      };
 
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() || "";
-
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-
-          const payload = trimmed.slice(5).trim();
-          if (!payload || payload === "[DONE]") continue;
-
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
+          if (!line.startsWith("data: ")) {
+            continue;
+          }
+          const payload = line.slice(6);
+          if (payload === "[DONE]") {
+            continue;
+          }
+          let parsed;
           try {
-            const chunk = JSON.parse(payload);
-            const text = readAssistantText(chunk);
-            if (!text) continue;
-
-            assistantText += text;
-            setStreamingText(assistantText);
-            updateSession(sessionId, (currentSession) => ({
-              ...currentSession,
-              messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: assistantText, status: "streaming" } : message)),
-              updatedAt: new Date().toISOString(),
-            }));
+            parsed = JSON.parse(payload);
           } catch {
-            // Ignore malformed chunks.
+            continue;
+          }
+          if (currentEvent === "9router.routing") {
+            routing = parsed;
+            continue;
+          }
+          const delta =
+            parsed?.choices?.[0]?.delta?.content ??
+            parsed?.choices?.[0]?.message?.content ??
+            (typeof parsed?.content === "string" ? parsed.content : "");
+          if (typeof delta === "string" && delta) {
+            assistantText += delta;
+            applyStreaming();
           }
         }
       }
 
-      updateSession(sessionId, (currentSession) => ({
-        ...currentSession,
-        messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: assistantText || message.content, status: "done" } : message)),
-        updatedAt: new Date().toISOString(),
+      updateSession(session.id, (current) => ({
+        ...current,
+        messages: current.messages.map((message) =>
+          message.id === assistantId
+            ? { ...message, content: assistantText, routing, streaming: false }
+            : message
+        ),
       }));
-      finalizeSessionTitle(sessionId, userText);
-    } catch (error) {
-      if (error.name !== "AbortError") {
-        const errorText = textValue(error?.message || error);
-        updateSession(sessionId, (currentSession) => ({
-          ...currentSession,
-          messages: currentSession.messages.map((message) => (message.id === assistantMessageId ? { ...message, content: message.content || `Error: ${errorText}`, status: "error" } : message)),
-          updatedAt: new Date().toISOString(),
-        }));
-        setLoadError(errorText || "Failed to send message.");
-      }
+    } catch (err) {
+      const aborted = err?.name === "AbortError";
+      updateSession(session.id, (current) => ({
+        ...current,
+        messages: current.messages.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                streaming: false,
+                error: aborted ? "Stopped" : String(err?.message || err),
+              }
+            : message
+        ),
+      }));
     } finally {
-      setIsSending(false);
-      setStreamingMessageId("");
-      setStreamingText("");
       abortRef.current = null;
+      setStreaming(false);
     }
-  };
+  }, [ensureSession, input, modelId, streaming, updateSession]);
 
-  const handleKeyDown = (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      if (canSend) sendMessage();
-    }
-  };
-
-  const modelLabel = activeModel ? `${activeModel.name}` : "Select model";
-  const modelSubLabel = activeModel ? activeModel.requestModel : "Choose from connected providers";
+  const detailMessage = useMemo(
+    () => messages.find((message) => message.id === detailMessageId && message.role === "assistant") || null,
+    [messages, detailMessageId]
+  );
 
   return (
-    <div className="relative flex-1 flex flex-col h-full min-h-0 min-w-0 bg-[#212121] text-white overflow-hidden">
-      <div className="relative mx-auto flex flex-1 h-full min-h-0 w-full max-w-4xl flex-col">
-        <div className="flex shrink-0 items-center justify-between gap-3 px-4 py-3 lg:px-6">
-          <div ref={modelMenuRef} className="relative">
+    <div className="flex h-full min-h-0 w-full gap-4 p-4 lg:p-6">
+      {/* Sessions + models */}
+      <aside className={`${showModels ? "flex" : "hidden"} w-full flex-col gap-3 lg:flex lg:w-72 lg:shrink-0`}>
+        <Button icon="add" onClick={createSession} className="w-full">
+          New chat
+        </Button>
+        <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface-1/60 p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-text-muted">Model</span>
+            {activeModel?.kind === "combo" ? <Chip className="bg-brand-500/10 text-brand-500">combo</Chip> : null}
+            {activeModel?.free ? <Chip className="bg-green-500/10 text-green-600 dark:text-green-400">free</Chip> : null}
+          </div>
+          <Input
+            placeholder="Search models…"
+            value={modelSearch}
+            onChange={(event) => setModelSearch(event.target.value)}
+          />
+          <div className="flex max-h-[320px] flex-col gap-2 overflow-y-auto pr-1 custom-scrollbar">
+            {groupedModels.map((group) => (
+              <div key={group.key} className="flex flex-col gap-1">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">{group.label}</span>
+                {group.models.map((model) => (
+                  <button
+                    key={model.id}
+                    type="button"
+                    onClick={() => setModelId(model.id)}
+                    className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors ${
+                      modelId === model.id ? "bg-brand-500/15 text-brand-500" : "hover:bg-surface-2 text-text-main"
+                    }`}
+                  >
+                    <span className="min-w-0 truncate">{modelLabel(model)}</span>
+                    {model.free ? <span className="shrink-0 text-[10px] text-green-500">free</span> : null}
+                  </button>
+                ))}
+              </div>
+            ))}
+            {groupedModels.length === 0 ? <p className="text-xs text-text-muted">No models available.</p> : null}
+          </div>
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto rounded-xl border border-border bg-surface-1/60 p-2 custom-scrollbar">
+          <span className="px-1 py-1 text-xs font-semibold uppercase tracking-wide text-text-muted">History</span>
+          {sessions.length === 0 ? <p className="px-1 text-xs text-text-muted">No conversations yet.</p> : null}
+          {sessions.map((session) => (
             <button
+              key={session.id}
               type="button"
-              onClick={() => setModelMenuOpen((value) => !value)}
-              className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8"
+              onClick={() => setActiveSessionId(session.id)}
+              className={`flex flex-col rounded-lg px-2 py-1.5 text-left transition-colors ${
+                session.id === activeSessionId ? "bg-brand-500/15" : "hover:bg-surface-2"
+              }`}
             >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-white">{modelLabel}</span>
-                  <span className="material-symbols-outlined text-[18px] text-white/70">expand_more</span>
-                </div>
-                <p className="truncate text-xs text-white/55">{modelSubLabel}</p>
-              </div>
+              <span className="truncate text-xs font-medium text-text-main">{session.title || "New chat"}</span>
+              <span className="truncate text-[10px] text-text-muted">{session.model || "—"}</span>
             </button>
+          ))}
+        </div>
+      </aside>
 
-            {modelMenuOpen ? (
-              <div className="absolute left-0 top-[calc(100%+10px)] z-30 w-[min(520px,calc(100vw-2rem))] overflow-hidden rounded-[20px] border border-white/10 bg-[#262626] shadow-2xl shadow-black/50">
-                <div className="border-b border-white/10 px-4 py-3">
-                  <p className="text-xs uppercase tracking-[0.22em] text-white/45">Models</p>
-                  <p className="text-sm text-white/75">Only from connected providers</p>
-                </div>
-                <div className="max-h-[60vh] overflow-y-auto p-2 custom-scrollbar">
-                  {providerGroups.map((group) => (
-                    <div key={group.providerId} className="mb-2 rounded-[16px] border border-white/10 bg-black/20 p-2">
-                      <div className="flex items-center justify-between px-2 py-2">
-                        <p className="text-sm font-semibold text-white">{group.providerName}</p>
-                        <Badge size="sm" variant="default">{group.models.length}</Badge>
-                      </div>
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        {group.models.map((model) => {
-                          const isActive = model.id === activeModelId;
-                          return (
-                            <button
-                              key={model.id}
-                              type="button"
-                              onClick={() => handleSelectModel(model.id)}
-                              className={`rounded-[14px] border px-3 py-3 text-left transition ${isActive ? "border-blue-400/40 bg-blue-500/15" : "border-white/10 bg-white/5 hover:bg-white/8"}`}
-                            >
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <p className="truncate text-sm font-medium text-white">{model.name}</p>
-                                  <p className="truncate text-[11px] text-white/45">{model.requestModel}</p>
-                                </div>
-                                {isActive ? <span className="material-symbols-outlined text-[18px] text-blue-300">check_circle</span> : null}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
+      {/* Chat */}
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface-1/60">
+        <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold">Chat</h1>
+            <p className="truncate text-xs text-text-muted">
+              {activeModel ? `${activeModel.provider_name || activeModel.owned_by} · ${modelLabel(activeModel)}` : "Pick a model"}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" icon="list" className="lg:hidden" onClick={() => setShowModels((value) => !value)}>
+              Models
+            </Button>
+            {streaming ? (
+              <Button size="sm" variant="danger" icon="stop" onClick={stop}>
+                Stop
+              </Button>
             ) : null}
           </div>
+        </header>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setHistoryOpen((value) => !value)}
-              className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/80 transition hover:bg-white/8"
-            >
-              History
-            </button>
-            <Button variant="ghost" size="sm" icon="delete" onClick={handleDeleteCurrentChat} disabled={!activeSessionId || sessions.length === 0}>
-              Clear
+        <div ref={scrollRef} className="flex flex-1 flex-col gap-4 overflow-y-auto p-4 custom-scrollbar">
+          {messages.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+              <span className="material-symbols-outlined text-4xl text-brand-500">forum</span>
+              <p className="text-sm font-medium">Ask anything</p>
+              <p className="max-w-sm text-xs text-text-muted">
+                Every answer shows the real routing: provider, account, combo fallbacks, tokens and latency.
+              </p>
+            </div>
+          ) : null}
+          {messages.map((message) => (
+            <div key={message.id} className={`flex flex-col ${message.role === "user" ? "items-end" : "items-start"}`}>
+              <div
+                className={`max-w-[85%] rounded-2xl px-4 py-2.5 ${
+                  message.role === "user"
+                    ? "bg-brand-500 text-white"
+                    : "border border-border bg-surface-2/70 text-text-main"
+                }`}
+              >
+                {message.role === "user" ? (
+                  <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                ) : (
+                  <>
+                    {message.content ? <Markdown text={message.content} /> : null}
+                    {message.streaming && !message.content ? (
+                      <span className="flex items-center gap-1 text-text-muted">
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500" />
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500 [animation-delay:120ms]" />
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500 [animation-delay:240ms]" />
+                      </span>
+                    ) : null}
+                    {message.error ? <p className="mt-2 text-xs text-red-500">{message.error}</p> : null}
+                  </>
+                )}
+              </div>
+              {message.role === "assistant" && message.routing ? (
+                <button type="button" className="w-full max-w-[85%] text-left" onClick={() => setDetailMessageId(message.id)}>
+                  <RoutingCard
+                    routing={message.routing.routing}
+                    latency={message.routing.latency}
+                    tokens={message.routing.tokens}
+                    provider={message.routing.provider}
+                    model={message.routing.model}
+                    connectionId={message.routing.connectionId}
+                    status={message.routing.status}
+                  />
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+
+        <div className="border-t border-border p-3">
+          {error ? <p className="mb-2 text-xs text-red-500">{error}</p> : null}
+          <div className="flex items-end gap-2">
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  send();
+                }
+              }}
+              rows={1}
+              placeholder="Send a message… (Enter to send, Shift+Enter for a new line)"
+              className="max-h-40 min-h-[42px] flex-1 resize-y rounded-xl border border-border bg-surface-2 px-3 py-2.5 text-sm text-text-main outline-none focus:border-brand-500/50"
+            />
+            <Button icon="send" onClick={send} loading={streaming} disabled={!input.trim() || !modelId}>
+              Send
             </Button>
           </div>
         </div>
+      </section>
 
-        {historyOpen ? (
-          <div ref={historyMenuRef} className="absolute right-4 top-[72px] z-20 w-[min(360px,calc(100vw-2rem))] rounded-[20px] border border-white/10 bg-[#262626] p-2 shadow-2xl shadow-black/50 lg:right-6">
-            <div className="px-3 py-2">
-              <p className="text-xs uppercase tracking-[0.22em] text-white/45">Recent chats</p>
-            </div>
-            <div className="max-h-[48vh] space-y-2 overflow-y-auto p-1 custom-scrollbar">
-              {sessionItems.length === 0 ? (
-                <div className="rounded-[16px] border border-dashed border-white/10 bg-white/5 p-4 text-sm text-white/55">
-                  No conversations yet.
-                </div>
-              ) : sessionItems.map((session) => {
-                const isActive = session.id === activeSessionId;
-                const latestMessage = [...(session.messages || [])].reverse().find((message) => message.role === "user") || session.messages?.[0];
-                return (
-                  <button
-                    key={session.id}
-                    type="button"
-                    onClick={() => handleSelectSession(session.id)}
-                    className={`w-full rounded-[16px] border px-3 py-3 text-left transition ${isActive ? "border-blue-400/40 bg-blue-500/15" : "border-white/10 bg-white/5 hover:bg-white/8"}`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium text-white">{session.title}</p>
-                        <p className="mt-1 truncate text-xs text-white/50">{textValue(latestMessage?.content) || "Empty chat"}</p>
-                      </div>
-                      <span className="text-[10px] text-white/40 shrink-0">{formatRelativeTime(session.updatedAt)}</span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
-
-        {loadError ? (
-          <div className="mt-4 rounded-[18px] border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-rose-100">
-            <div className="flex items-start gap-3">
-              <span className="material-symbols-outlined text-[20px]">error</span>
-              <p className="text-sm leading-6">{loadError}</p>
-            </div>
-          </div>
-        ) : null}
-
-        <div className="flex flex-1 flex-col min-h-0">
-          <div className="flex-1 overflow-y-auto py-4 custom-scrollbar">
-            {currentMessages.length === 0 ? (
-              <div className="flex min-h-[50vh] items-center justify-center px-4 text-center">
-                <div className="max-w-xl space-y-4">
-                  <div className="mx-auto flex size-16 items-center justify-center rounded-[20px] border border-white/10 bg-white/5 text-white/80">
-                    <span className="material-symbols-outlined text-[30px]">chat</span>
-                  </div>
-                  <div className="space-y-2">
-                    <h2 className="text-2xl font-semibold text-white">Start a conversation</h2>
-                    <p className="text-sm leading-6 text-white/60">
-                      Simple chat interface to interact with any AI model from connected providers. Select a model and start chatting!
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4">
-              {currentMessages.map((message) => {
-                const isUser = message.role === "user";
-                const isAssistant = message.role === "assistant";
-                const isStreaming = isAssistant && message.id === streamingMessageId && message.status === "streaming";
-                const content = textValue(message.content) || (isAssistant ? streamingText : "");
-
-                return (
-                  <div key={message.id} className={`flex w-full ${isUser ? "justify-end" : "justify-start"} mb-6`}>
-                    <div className={`max-w-[min(88%,42rem)] ${isUser ? "rounded-3xl bg-[#2f2f2f] px-5 py-3.5 text-white" : "text-white/90"}`}>
-                      <div className="mb-1 flex items-center justify-between gap-3">
-                        <span className="text-xs font-semibold">{isUser ? "You" : activeModel?.name || "Assistant"}</span>
-                      </div>
-
-                      {message.attachments?.length ? (
-                        <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3 mt-2">
-                          {message.attachments.map((attachment) => (
-                            <a key={attachment.id} href={attachment.dataUrl} target="_blank" rel="noreferrer" className="overflow-hidden rounded-[18px] border border-white/10 bg-black/20">
-                              <img src={attachment.dataUrl} alt={attachment.name} className="h-28 w-full object-cover" loading="lazy" decoding="async" />
-                            </a>
-                          ))}
-                        </div>
-                      ) : null}
-
-                      <div className="whitespace-pre-wrap break-words text-[15px] leading-7">
-                        {content}
-                        {isAssistant && isStreaming && !streamingText ? <span className="inline-block animate-pulse">▋</span> : null}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="shrink-0 pt-2">
-            {attachments.length > 0 ? (
-              <div className="mx-auto mb-3 flex w-full max-w-3xl flex-wrap gap-2 px-4">
-                {attachments.map((attachment) => (
-                  <div key={attachment.id} className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2">
-                    <span className="text-xs text-white/80 max-w-[12rem] truncate">{attachment.name}</span>
-                    <button type="button" onClick={() => removeAttachment(attachment.id)} className="text-white/55 hover:text-white" aria-label="Remove attachment">
-                      <span className="material-symbols-outlined text-[18px]">close</span>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            <div className="mx-auto w-full max-w-3xl px-4 pb-2">
-              <div className="rounded-[26px] bg-[#2f2f2f] px-3 pt-3 pb-2 shadow-[0_0_15px_rgba(0,0,0,0.10)] ring-1 ring-white/5">
-                <textarea
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Message AI"
-                  rows={1}
-                  className="w-full resize-none bg-transparent px-2 text-[15px] leading-6 text-white outline-none placeholder:text-white/40 custom-scrollbar max-h-[25vh] overflow-y-auto"
-                />
-
-                <div className="mt-2 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <button type="button" onClick={() => fileInputRef.current?.click()} disabled={!activeModel || loadingData} className="p-2 text-white/50 hover:text-white transition rounded-full hover:bg-white/5">
-                      <span className="material-symbols-outlined text-[20px]">attach_file</span>
-                    </button>
-                    <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleAttachFiles} />
-                    <span className="text-xs font-medium text-white/30 truncate max-w-[120px]">{activeModel ? activeModel.name : "No model"}</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {isSending ? (
-                      <button type="button" onClick={handleStop} className="p-2 text-white bg-white/10 hover:bg-white/20 transition rounded-full h-8 w-8 flex items-center justify-center">
-                        <span className="material-symbols-outlined text-[16px]">stop</span>
-                      </button>
-                    ) : null}
-                    <button onClick={sendMessage} disabled={!canSend} className={`h-8 w-8 rounded-full flex items-center justify-center transition ${canSend ? 'bg-white text-black hover:opacity-90' : 'bg-white/10 text-white/30 cursor-not-allowed'}`}>
-                      <span className="material-symbols-outlined text-[16px]">arrow_upward</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <p className="mx-auto mt-2 max-w-3xl px-4 pb-4 text-center text-[11px] text-white/30">
-            Model list is filtered from connected providers.
-          </p>
+      {/* Run details */}
+      <aside className="hidden w-80 shrink-0 flex-col gap-3 overflow-y-auto rounded-2xl border border-border bg-surface-1/60 p-4 xl:flex custom-scrollbar">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold">Run details</h2>
+          {detailMessage ? (
+            <Button size="sm" variant="ghost" icon="content_copy" onClick={() => copy(JSON.stringify(detailMessage.routing, null, 2))}>
+              Copy
+            </Button>
+          ) : null}
         </div>
-      </div>
+        {!detailMessage ? (
+          <p className="text-xs text-text-muted">Send a message to inspect the routing trace here.</p>
+        ) : (
+          <div className="flex flex-col gap-3 text-xs">
+            <div className="flex flex-wrap gap-1.5">
+              <Chip>{detailMessage.routing?.provider || "—"}</Chip>
+              <Chip>{detailMessage.routing?.model || "—"}</Chip>
+              <Chip>account {shortId(detailMessage.routing?.connectionId)}</Chip>
+              {detailMessage.routing?.routing?.combo?.name ? (
+                <Chip className="bg-brand-500/10 text-brand-500">combo · {detailMessage.routing.routing.combo.name}</Chip>
+              ) : null}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-lg border border-border bg-surface-2/50 p-2">
+                <p className="text-text-muted">TTFT</p>
+                <p className="text-sm font-semibold">{formatMs(detailMessage.routing?.latency?.ttft)}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface-2/50 p-2">
+                <p className="text-text-muted">Total</p>
+                <p className="text-sm font-semibold">{formatMs(detailMessage.routing?.latency?.total)}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface-2/50 p-2">
+                <p className="text-text-muted">Prompt</p>
+                <p className="text-sm font-semibold">{formatNumber(detailMessage.routing?.tokens?.prompt_tokens ?? detailMessage.routing?.tokens?.input_tokens)}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface-2/50 p-2">
+                <p className="text-text-muted">Completion</p>
+                <p className="text-sm font-semibold">{formatNumber(detailMessage.routing?.tokens?.completion_tokens ?? detailMessage.routing?.tokens?.output_tokens)}</p>
+              </div>
+            </div>
+            <details open>
+              <summary className="cursor-pointer text-text-muted">Raw trace</summary>
+              <pre className="mt-1 max-h-80 overflow-auto rounded-lg border border-border bg-surface-3/60 p-2 font-mono text-[10px] text-text-main">
+                {JSON.stringify(detailMessage.routing, null, 2)}
+              </pre>
+            </details>
+          </div>
+        )}
+      </aside>
     </div>
   );
 }
