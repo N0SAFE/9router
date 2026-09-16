@@ -14,7 +14,8 @@ export default {
     },
   },
   category: "free",
-  noAuth: true,
+  authModes: ["apikey"],
+  keyOptional: true,
   transport: {
     baseUrl: "http://localhost:8000/v1/chat/completions",
     format: "openai",

@@ -10,7 +10,14 @@ const BULK_PLACEHOLDER = `name1|sk-key1\nname2|sk-key2\nsk-key-only-auto-named`;
 
 export default function AddApiKeyModal({ isOpen, provider, providerName, isCompatible, isAnthropic, authType, authHint, website, proxyPools, error, existingNames, onSave, onBulkDone, onClose }) {
   const NONE_PROXY_POOL_VALUE = "__none__";
-  const isOllamaLocal = provider === "ollama-local";
+  const providerInfo = AI_PROVIDERS?.[provider] || {};
+  const KEY_OPTIONAL_HOSTS = {
+    "ollama-local": "http://localhost:11434",
+    llamacpp: "http://localhost:8080",
+    vllm: "http://localhost:8000",
+  };
+  const isKeyOptional = provider === "ollama-local" || providerInfo.keyOptional === true;
+  const defaultHost = KEY_OPTIONAL_HOSTS[provider] || "";
   const isCookie = authType === "cookie";
   const isXaiApiKey = provider === "xai" && !isCookie;
   const credentialLabel = isCookie ? "Cookie Value" : provider === "qoder" ? "Personal Access Token (PAT)" : "API Key";
@@ -53,7 +60,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const [bulkResult, setBulkResult] = useState(null); // { success, failed }
 
   const buildProviderSpecificData = () => {
-    if (isOllamaLocal && formData.ollamaHostUrl.trim()) {
+    if (isKeyOptional && formData.ollamaHostUrl.trim()) {
       return { baseUrl: formData.ollamaHostUrl.trim() };
     }
     if (isAzure) {
@@ -92,9 +99,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
 
   const handleSubmit = async () => {
     if (!provider) return;
-    if (!isOllamaLocal && !formData.apiKey) return;
-    if (!isOllamaLocal) {
-      // Non-ollama providers require a name
+    if (!isKeyOptional && !formData.apiKey) return;
+    if (!isKeyOptional) {
+      // Providers with a required credential also require a name
       if (!formData.name) return;
     }
     if (isCompatible && !formData.defaultModel.trim()) return;
@@ -120,7 +127,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
       }
 
       await onSave({
-        name: formData.name || (isOllamaLocal ? "Ollama Local" : ""),
+        name: formData.name || (isKeyOptional ? providerInfo.name || provider : ""),
         apiKey: formData.apiKey,
         defaultModel: isCompatible ? formData.defaultModel.trim() : undefined,
         priority: formData.priority,
@@ -231,15 +238,15 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
           label="Name"
           value={formData.name}
           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-          placeholder={isOllamaLocal ? "Ollama Local" : "Production Key"}
+          placeholder={isKeyOptional ? providerInfo.name || provider : "Production Key"}
         />
-        {isOllamaLocal && (
+        {isKeyOptional && (
           <div className="flex gap-2">
             <Input
-              label="Ollama Host URL"
+              label="Server URL"
               value={formData.ollamaHostUrl}
               onChange={(e) => setFormData({ ...formData, ollamaHostUrl: e.target.value })}
-              placeholder="http://localhost:11434"
+              placeholder={defaultHost}
               className="flex-1"
             />
             <div className="pt-6">
@@ -249,7 +256,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             </div>
           </div>
         )}
-        {!isOllamaLocal && (
+        {!isKeyOptional && (
           <div className="flex gap-2">
             <Input
               label={credentialLabel}
@@ -300,9 +307,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             placeholder={isAnthropic ? "claude-3-5-sonnet-latest" : "gpt-4o-mini"}
           />
         )}
-        {isOllamaLocal && (
+        {isKeyOptional && (
           <p className="text-xs text-text-muted">
-            Leave blank to use <code>http://localhost:11434</code>. For remote Ollama, enter the full host URL (e.g. <code>http://192.168.1.10:11434</code>).
+            Leave blank to use <code>{defaultHost || "the default host"}</code>. For a remote server, enter the full URL (e.g. <code>http://192.168.1.10:11434</code>).
           </p>
         )}
         {validationResult && (
@@ -393,7 +400,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         </p>
 
         <div className="flex gap-2">
-          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isOllamaLocal && (!formData.name || !formData.apiKey)) || (isCompatible && !formData.defaultModel.trim()) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
+          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isKeyOptional && (!formData.name || !formData.apiKey)) || (isCompatible && !formData.defaultModel.trim()) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
             {saving ? "Saving..." : "Save"}
           </Button>
           <Button onClick={onClose} variant="ghost" fullWidth>

@@ -14,7 +14,7 @@ export default {
       apiKeyUrl: "https://ollama.com/settings/keys",
     },
   },
-  category: "freeTier",
+  category: "apikey",
   authType: "apikey",
   authModes: ["apikey"],
   transport: {

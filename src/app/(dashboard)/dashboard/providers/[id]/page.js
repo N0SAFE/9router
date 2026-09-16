@@ -1427,10 +1427,7 @@ export default function ProviderDetailPage() {
       )}
 
       {["ollama-local", "llamacpp", "vllm"].includes(providerId) && (
-        <LocalModelsPanel
-          providerId={providerId}
-          host={connections[0]?.providerSpecificData?.baseUrl || ""}
-        />
+        <LocalModelsPanel providerId={providerId} connections={connections} />
       )}
 
       {isCompatible && providerNode && (

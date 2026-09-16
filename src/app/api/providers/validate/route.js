@@ -89,7 +89,8 @@ export async function POST(request) {
     const { apiKey, providerSpecificData } = body;
 
     const isNoAuth = AI_PROVIDERS[provider]?.noAuth === true;
-    if (!provider || (!apiKey && provider !== "ollama-local" && !isNoAuth)) {
+    const isKeyOptional = AI_PROVIDERS[provider]?.keyOptional === true || provider === "ollama-local";
+    if (!provider || (!apiKey && !isKeyOptional && !isNoAuth)) {
       return NextResponse.json({ error: "Provider and API key required" }, { status: 400 });
     }
 
@@ -366,6 +367,8 @@ export async function POST(request) {
         case "hyperbolic":
         case "ollama":
         case "ollama-local":
+        case "llamacpp":
+        case "vllm":
         case "assemblyai":
         case "nanobanana":
         case "chutes":
@@ -378,6 +381,8 @@ export async function POST(request) {
             ),
             // dynamic URLs (depend on providerSpecificData) — kept inline
             "ollama-local": `${resolveOllamaLocalHost({ providerSpecificData })}/api/tags`,
+            "llamacpp": `${String(providerSpecificData?.baseUrl || "http://localhost:8080").replace(/\/$/, "")}/v1/models`,
+            "vllm": `${String(providerSpecificData?.baseUrl || "http://localhost:8000").replace(/\/$/, "")}/v1/models`,
             "xiaomi-tokenplan": `${resolveXiaomiTokenplanBaseUrl({ providerSpecificData })}/models`,
           };
           const headers = {};
