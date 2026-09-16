@@ -390,6 +390,25 @@ dashboard-auth endpoints under `/api/local`:
   attempts with statuses/actions, TTFT, total latency, tokens) plus a Run
   Details panel with the raw trace.
 
+## Remote Agent Host
+
+`/dashboard/remote` turns the 9Router machine into a VS Code remote agent host:
+
+- `src/lib/remote/agentHost.js` drives the VS Code CLI: `code agent host
+  --tunnel --name <host>` starts a standalone Agent Host (AHP over WebSocket)
+  exposed through a dev tunnel, logged to `~/.9router/remote/agent-host.log`.
+  `code agent endpoints` (with connection tokens) and `code agent ps` feed the
+  dashboard's endpoint/session lists; workspaces are cloned into
+  `~/.9router/remote/workspaces` with strict URL/branch validation.
+- Clients connect from the desktop Agents window (New session → Remote →
+  Tunnels) or `insiders.vscode.dev/agents`; sessions run next to the workspace
+  on this machine and survive client disconnects.
+- Harnesses (Claude Code / Codex / opencode) read their own model config on the
+  host — point them at `http://127.0.0.1:20128` with the CLI Tools page so
+  remote sessions consume 9Router providers/comboes/pools.
+- API: `GET/POST/DELETE /api/remote/agent`, `GET /api/remote/agent/logs`
+  (dashboard-auth).
+
 ## OAuth Onboarding and Token Refresh Lifecycle
 
 ```mermaid
