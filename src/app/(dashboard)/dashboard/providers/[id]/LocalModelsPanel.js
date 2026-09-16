@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { Button, Card, Input } from "@/shared/components";
+import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 const SERVER_DEFAULTS = {
   "ollama-local": "http://localhost:11434",
@@ -34,6 +36,19 @@ function formatDate(value) {
   } catch {
     return String(value);
   }
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "0s";
+  }
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  if (minutes >= 60) {
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  }
+  return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`;
 }
 
 /**
@@ -89,6 +104,11 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
   const [showLogs, setShowLogs] = useState(false);
   const [metrics, setMetrics] = useState(null);
   const [starting, setStarting] = useState(false);
+  const [modelFilter, setModelFilter] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const pullAbortRef = useRef(null);
+  const logsRef = useRef(null);
+  const { copy } = useCopyToClipboard();
 
   const endpointHost = host || SERVER_DEFAULTS[providerId] || "";
 
@@ -100,6 +120,7 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
       const response = await fetch(url, { cache: "no-store" });
       const data = await response.json();
       setStatus(data);
+      setLastUpdated(Date.now());
       setError(data.online ? "" : `Server not reachable at ${data.host || data.baseUrl || endpointHost}`);
     } catch (err) {
       setStatus(null);
@@ -111,6 +132,14 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
     // Initial load; refresh() awaits its fetch before updating state.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
+  }, [refresh]);
+
+  // Keep the panel in sync with servers started/stopped outside the app.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void refresh();
+    }, 15000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   const refreshLogs = useCallback(async () => {
@@ -136,6 +165,12 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
     const timer = setInterval(refreshLogs, 3000);
     return () => clearInterval(timer);
   }, [refreshLogs, showLogs]);
+
+  useEffect(() => {
+    if (showLogs && logsRef.current) {
+      logsRef.current.scrollTop = logsRef.current.scrollHeight;
+    }
+  }, [logs, showLogs]);
 
   useEffect(() => {
     if (providerId !== "vllm") {
@@ -196,12 +231,17 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
       return;
     }
     setError("");
-    setPull({ model: installModel, status: "starting", percent: 0 });
+    setPull({ model: installModel, status: "starting", percent: 0, rate: null, eta: null });
+    const controller = new AbortController();
+    pullAbortRef.current = controller;
+    const startedAt = Date.now();
+    let lastCompleted = 0;
     try {
       const response = await fetch("/api/local/ollama/pull", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ host, model: installModel }),
+        signal: controller.signal,
       });
       if (!response.ok || !response.body) {
         const data = await response.json().catch(() => ({}));
@@ -235,21 +275,54 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
           const percent = Number.isFinite(event.total) && event.total > 0
             ? Math.round((Number(event.completed || 0) / event.total) * 100)
             : null;
-          setPull((previous) => previous
-            ? { ...previous, status: event.status || previous.status, percent: percent ?? previous.percent }
-            : previous);
+          const elapsedSeconds = (Date.now() - startedAt) / 1000;
+          setPull((previous) => {
+            if (!previous) {
+              return previous;
+            }
+            let rateText = previous.rate;
+            let etaText = previous.eta;
+            if (Number.isFinite(event.completed) && Number.isFinite(event.total) && elapsedSeconds > 0.5) {
+              const bytesPerSecond = Number(event.completed) / elapsedSeconds;
+              if (bytesPerSecond > 0) {
+                rateText = `${formatBytes(bytesPerSecond)}/s`;
+                const remaining = Number(event.total) - Number(event.completed);
+                etaText = remaining > 0 ? formatDuration(remaining / bytesPerSecond) : "0s";
+              }
+            }
+            lastCompleted = Number.isFinite(event.completed) ? Number(event.completed) : lastCompleted;
+            return {
+              ...previous,
+              status: event.status || previous.status,
+              percent: percent ?? previous.percent,
+              rate: rateText,
+              eta: etaText,
+            };
+          });
         }
       }
 
-      setPull({ model: installModel, status: "done", percent: 100 });
+      setPull({ model: installModel, status: "done", percent: 100, rate: null, eta: null });
       setModelInput("");
       await refresh();
       setTimeout(() => setPull(null), 2500);
     } catch (err) {
-      setPull(null);
-      setError(String(err?.message || err));
+      if (err?.name === "AbortError") {
+        setPull(null);
+        setError("Download cancelled");
+      } else {
+        setPull(null);
+        setError(String(err?.message || err));
+      }
+    } finally {
+      pullAbortRef.current = null;
     }
   }, [host, installModel, pull, refresh]);
+
+  const cancelPull = useCallback(() => {
+    pullAbortRef.current?.abort();
+    pullAbortRef.current = null;
+  }, []);
 
   const deleteModel = useCallback(async (model) => {
     if (!window.confirm(`Delete "${model}" from the local Ollama server?`)) {
@@ -323,8 +396,20 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
   const online = Boolean(status?.online);
   const serverModel = !isOllama && models.length > 0 ? models[0] : null;
   const processState = status?.process || null;
+  const processSource = processState?.source || null;
   const effectiveModel = runModel || processState?.model || "";
   const effectivePort = runPort || (processState?.port ? String(processState.port) : "");
+  const filteredModels = models.filter((model) =>
+    !modelFilter.trim() ||
+    String(model.name || model.model || "").toLowerCase().includes(modelFilter.trim().toLowerCase())
+  );
+  const processLabel = !processState?.running
+    ? "stopped"
+    : processSource === "managed"
+      ? `running · app pid ${processState.pid}`
+      : processSource === "system"
+        ? `running · system pid ${processState.pid}`
+        : "running · external";
 
   const startServer = useCallback(async () => {
     setStarting(true);
@@ -464,9 +549,20 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
           </div>
           {pull && (
             <div className="mt-3">
-              <div className="mb-1 flex items-center justify-between text-xs text-text-muted">
-                <span className="truncate">{pull.model} · {pull.status}</span>
-                <span>{pull.percent}%</span>
+              <div className="mb-1 flex items-center justify-between gap-2 text-xs text-text-muted">
+                <span className="min-w-0 truncate">
+                  {pull.model} · {pull.status}
+                  {pull.rate ? ` · ${pull.rate}` : ""}
+                  {pull.eta ? ` · ETA ${pull.eta}` : ""}
+                </span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {pull.percent}%
+                  {pull.status !== "done" && (
+                    <Button size="sm" variant="ghost" icon="close" onClick={cancelPull}>
+                      Cancel
+                    </Button>
+                  )}
+                </span>
               </div>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
                 <div
@@ -491,9 +587,17 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
                 : "bg-surface-3 text-text-muted"
             }`}
           >
-            {processState?.running ? `running · pid ${processState.pid}` : "stopped"}
+            {processLabel}
           </span>
         </div>
+
+        {processState?.running && processSource !== "managed" && (
+          <p className="mt-2 text-xs text-text-muted">
+            {processSource === "system"
+              ? "Detected as a system process — stop it from its own service/terminal."
+              : "Server is reachable but no local process matched — it may run in a container or on another host."}
+          </p>
+        )}
 
         {!isOllama && (
           <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-end">
@@ -515,12 +619,17 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
                 disabled={Boolean(processState?.running)}
               />
             </div>
-            {processState?.running ? (
+            {processSource === "managed" ? (
               <Button variant="danger" icon="stop" loading={starting} onClick={stopServer}>
                 Stop
               </Button>
             ) : (
-              <Button icon="play_arrow" loading={starting} disabled={!effectiveModel.trim()} onClick={startServer}>
+              <Button
+                icon="play_arrow"
+                loading={starting}
+                disabled={Boolean(processState?.running) || !effectiveModel.trim()}
+                onClick={startServer}
+              >
                 Start
               </Button>
             )}
@@ -529,12 +638,18 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
 
         {isOllama && (
           <div className="mt-2 flex items-center gap-2">
-            {processState?.running ? (
+            {processSource === "managed" ? (
               <Button size="sm" variant="danger" icon="stop" loading={starting} onClick={stopServer}>
                 Stop ollama serve
               </Button>
             ) : (
-              <Button size="sm" icon="play_arrow" loading={starting} onClick={startServer}>
+              <Button
+                size="sm"
+                icon="play_arrow"
+                loading={starting}
+                disabled={Boolean(processState?.running)}
+                onClick={startServer}
+              >
                 Start ollama serve
               </Button>
             )}
@@ -542,7 +657,17 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
         )}
 
         {processState?.command ? (
-          <p className="mt-2 break-all font-mono text-[11px] text-text-muted">{processState.command}</p>
+          <div className="mt-2 flex items-center gap-2">
+            <p className="min-w-0 flex-1 break-all font-mono text-[11px] text-text-muted">{processState.command}</p>
+            <Button size="sm" variant="ghost" icon="content_copy" onClick={() => copy(processState.command)}>
+              Copy
+            </Button>
+          </div>
+        ) : null}
+        {processState?.running && processState?.startedAt ? (
+          <p className="mt-1 text-xs text-text-muted">
+            up {formatDuration((Date.now() - new Date(processState.startedAt).getTime()) / 1000)}
+          </p>
         ) : null}
 
         <div className="mt-2 flex items-center gap-2">
@@ -550,14 +675,37 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
             {showLogs ? "Hide logs" : "Logs"}
           </Button>
           {showLogs ? (
-            <Button size="sm" variant="ghost" icon="refresh" onClick={refreshLogs}>
-              Refresh
-            </Button>
+            <>
+              <Button size="sm" variant="ghost" icon="refresh" onClick={refreshLogs}>
+                Refresh
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                icon="delete"
+                onClick={async () => {
+                  await fetch(`/api/local/server/logs?provider=${encodeURIComponent(providerId)}`, {
+                    method: "DELETE",
+                  });
+                  setLogs("");
+                }}
+              >
+                Clear
+              </Button>
+            </>
+          ) : null}
+          {lastUpdated ? (
+            <span className="ml-auto text-[10px] text-text-muted">
+              updated {new Date(lastUpdated).toLocaleTimeString()}
+            </span>
           ) : null}
         </div>
 
         {showLogs ? (
-          <pre className="mt-2 max-h-52 overflow-auto rounded-lg border border-border bg-surface-3/60 p-2 font-mono text-[10px] text-text-main">
+          <pre
+            ref={logsRef}
+            className="mt-2 max-h-52 overflow-auto rounded-lg border border-border bg-surface-3/60 p-2 font-mono text-[10px] text-text-main"
+          >
             {logs || "No logs yet."}
           </pre>
         ) : null}
@@ -629,27 +777,57 @@ export default function LocalModelsPanel({ providerId, connections = [] }) {
 
       {isOllama && (
         <div>
-          <p className="mb-2 text-sm font-medium">Installed models</p>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium">Installed models</p>
+            {models.length > 0 ? (
+              <Input
+                placeholder="Filter models…"
+                value={modelFilter}
+                onChange={(event) => setModelFilter(event.target.value)}
+                className="w-full sm:w-56"
+              />
+            ) : null}
+          </div>
           {models.length === 0 ? (
             <p className="text-sm text-text-muted">
               {online ? "No models installed yet — install one above." : "Ollama is not reachable."}
             </p>
+          ) : filteredModels.length === 0 ? (
+            <p className="text-sm text-text-muted">No model matches “{modelFilter}”.</p>
           ) : (
             <div className="flex flex-col divide-y divide-black/[0.03] rounded-lg border border-border dark:divide-white/[0.03]">
-              {models.map((model) => {
+              {filteredModels.map((model) => {
                 const name = model.name || model.model;
                 return (
-                  <div key={name} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <div key={name} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium">{name}</p>
                       <p className="text-xs text-text-muted">
                         {formatBytes(model.size)}
                         {model.details?.parameter_size ? ` · ${model.details.parameter_size}` : ""}
-                        {model.modified_at ? ` · ${formatDate(model.modified_at)}` : ""}
+                        {model.details?.quantization_level ? ` · ${model.details.quantization_level}` : ""}
+                        {model.details?.family ? ` · ${model.details.family}` : ""}
+                        {model.modified_at ? ` · ${model.modified_at.slice(0, 10)}` : ""}
                         {testResult?.model === name ? ` · tested in ${testResult.ms} ms` : ""}
                       </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon="content_copy"
+                        onClick={() => copy(name)}
+                        title="Copy model name"
+                      >
+                        Copy
+                      </Button>
+                      <Link
+                        href={`/dashboard/basic-chat?model=${encodeURIComponent(`ollama-local/${name}`)}`}
+                        className="inline-flex h-7 items-center gap-1.5 rounded-[8px] border border-border px-3 text-xs font-semibold text-text-main transition-colors hover:bg-surface-2"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">forum</span>
+                        Chat
+                      </Link>
                       <Button
                         size="sm"
                         variant="secondary"

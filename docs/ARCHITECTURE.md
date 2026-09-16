@@ -351,10 +351,16 @@ dashboard-auth endpoints under `/api/local`:
   render a live progress bar, and the install combobox is populated from a
   cached scrape of ollama.com/library (`/api/local/ollama/library`, curated
   offline fallback, per-model tags).
-- `llamacpp` (port 8080) and `vllm` (port 8000) — no-auth local providers:
-  when the server runs, `{{baseUrl}}/v1/models` is fetched live and the models
-  appear automatically in every catalog. `/api/local/server/status` reports
-  health, the served model and llama.cpp's context size.
+- `llamacpp` (port 8080) and `vllm` (port 8000) — keyless local providers in
+  the Free group, configured through a connection (Server URL) so the same
+  provider can point at a remote instance. They expose nothing until a
+  connection exists and the server answers; `{{baseUrl}}/v1/models` is then
+  fetched live. `/api/local/server/status` reports health, the served model and
+  llama.cpp's context size; the provider page shows a connection selector,
+  per-connection models and (local hosts only) process start/stop + logs.
+- Ollama Cloud lives under API Key (it needs a key); Ollama Local is keyless
+  (Free). Both are connection-based; `keyOptional` providers validate without a
+  credential by probing their models endpoint.
 - `modelsFetcher` URLs understand `{{baseUrl}}`, expanded from the
   connection's `providerSpecificData.baseUrl` or the provider's default
   transport origin (localhost:11434 / 8080 / 8000).
@@ -364,6 +370,11 @@ dashboard-auth endpoints under `/api/local`:
   (`llama-server -hf …`, `vllm serve …`, `ollama serve`) detached, records pid
   state and logs to `~/.9router/local/<provider>.*`, validates every argument
   (shell-safe tokens) and parses vLLM's Prometheus `/metrics` for the UI.
+  State detection checks the managed pid first, then scans the system process
+  table (`parseProcessList`) for an existing `ollama serve` / `llama-server` /
+  `vllm serve`, and finally falls back to "external" when the endpoint answers
+  but no local process matches (containers, remote hosts). The panel offers
+  Stop only for processes this app started.
 
 ## Dashboard Chat Panel
 
