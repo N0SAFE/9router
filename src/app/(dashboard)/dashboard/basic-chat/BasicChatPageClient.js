@@ -301,7 +301,10 @@ export default function BasicChatPageClient() {
       .then((data) => {
         const list = Array.isArray(data.data) ? data.data : [];
         setModels(list);
-        if (!modelId && list.length > 0) {
+        const requested = new URLSearchParams(window.location.search).get("model");
+        if (requested && list.some((model) => model.id === requested)) {
+          setModelId(requested);
+        } else if (!modelId && list.length > 0) {
           setModelId(list[0].id);
         }
       })

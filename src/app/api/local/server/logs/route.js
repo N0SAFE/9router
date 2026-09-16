@@ -14,7 +14,7 @@ export async function GET(request) {
   const lines = Number.isNaN(linesRaw) ? 120 : Math.min(Math.max(linesRaw, 10), 1000);
   return NextResponse.json({
     provider,
-    process: readServerState(provider),
+    process: await readServerState(provider),
     logs: readServerLogs(provider, lines),
   });
 }

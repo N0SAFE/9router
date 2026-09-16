@@ -24,13 +24,17 @@ export async function GET(request) {
       return NextResponse.json({ error: "baseUrl is required" }, { status: 400 });
     }
 
-    const processState = readServerState(provider);
+    let processState = await readServerState(provider);
     if (provider === "ollama-local") {
       const version = await fetchJsonWithTimeout(`${baseUrl}/api/version`);
+      const online = version !== null;
+      if (online && !processState.running) {
+        processState = { ...processState, running: true, source: "external" };
+      }
       return NextResponse.json({
         provider,
         baseUrl,
-        online: version !== null,
+        online,
         version: version?.version || null,
         models: [],
         process: processState,
@@ -42,13 +46,18 @@ export async function GET(request) {
       provider === "llamacpp" ? fetchJsonWithTimeout(`${baseUrl}/props`) : null,
     ]);
     const models = Array.isArray(modelsPayload?.data) ? modelsPayload.data : [];
+    const online = modelsPayload !== null;
+    if (online && !processState.running) {
+      processState = { ...processState, running: true, source: "external" };
+    }
 
     return NextResponse.json({
       provider,
       baseUrl,
-      online: modelsPayload !== null,
+      online,
       models: models.map((model) => ({ id: model.id, name: model.id })),
       contextLength: props?.default_generation_settings?.n_ctx ?? null,
+      modelPath: props?.model_path ?? null,
       process: processState,
     });
   } catch (error) {
@@ -72,7 +81,7 @@ export async function POST(request) {
       port: Number.isInteger(body.port) ? body.port : null,
       extraArgs: body.extraArgs,
     });
-    return NextResponse.json({ process: state });
+    return NextResponse.json({ process: await state });
   } catch (error) {
     return NextResponse.json({ error: error?.message || "Failed to start the server" }, { status: 400 });
   }
@@ -88,7 +97,7 @@ export async function DELETE(request) {
     const body = await request.json().catch(() => ({}));
     const provider = String(body.provider || "").trim();
     const state = stopServer(provider);
-    return NextResponse.json({ process: state });
+    return NextResponse.json({ process: await state });
   } catch (error) {
     return NextResponse.json({ error: error?.message || "Failed to stop the server" }, { status: 400 });
   }
