@@ -8,6 +8,15 @@ export async function register() {
     const { installCatalogSource } = await import("open-sse/providers/catalogOverride.js");
     await installCatalogSource();
 
+    // Local tools: create default connections for installed servers (best
+    // effort, cached) so the dashboard always shows them.
+    try {
+      const { autoProvisionLocalConnections } = await import("@/lib/local/autoProvision");
+      await autoProvisionLocalConnections();
+    } catch {
+      // best effort
+    }
+
     const { startModelCatalogSync } = await import("@/lib/modelCatalog/sync.js");
     startModelCatalogSync();
 

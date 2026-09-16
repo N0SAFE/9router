@@ -20,6 +20,7 @@ export async function GET(request) {
     const { searchParams } = new URL(request.url);
     const provider = (searchParams.get("provider") || "").trim();
     const baseUrl = resolveServerBase(request, searchParams.get("baseUrl"), DEFAULTS[provider] || "");
+    const connectionId = searchParams.get("connectionId") || "";
     if (!baseUrl) {
       return NextResponse.json({ error: "baseUrl is required" }, { status: 400 });
     }
@@ -30,6 +31,11 @@ export async function GET(request) {
       const online = version !== null;
       if (online && !processState.running) {
         processState = { ...processState, running: true, source: "external" };
+      }
+      if (connectionId) {
+        void import("@/lib/local/autoProvision")
+          .then(({ syncConnectionHealth }) => syncConnectionHealth(connectionId, online))
+          .catch(() => {});
       }
       return NextResponse.json({
         provider,
@@ -49,6 +55,11 @@ export async function GET(request) {
     const online = modelsPayload !== null;
     if (online && !processState.running) {
       processState = { ...processState, running: true, source: "external" };
+    }
+    if (connectionId) {
+      void import("@/lib/local/autoProvision")
+        .then(({ syncConnectionHealth }) => syncConnectionHealth(connectionId, online))
+        .catch(() => {});
     }
 
     return NextResponse.json({
