@@ -430,6 +430,27 @@ agent sessions on the 9Router machine:
   option group and streaming markdown are all built-in UI, which gives the
   same "continue elsewhere" experience as cloud sessions but on this host.
 
+## Remote Workspace Tunnel (VS Code harness on this machine)
+
+`code tunnel` (VS Code Server + tunnel) is managed from `/dashboard/remote`:
+
+- `src/lib/remote/tunnel.js` starts/stops `code tunnel --name <host>
+  --accept-server-license-terms` (or `tunnel service install` for an
+  always-on service), logs to `~/.9router/remote/tunnel.log` and surfaces the
+  `https://vscode.dev/tunnel/<name>` URL plus the GitHub device code from the
+  log. API: `/api/remote/tunnel` (dashboard) and `/api/v1/remote/tunnel`
+  (API-key).
+- Connecting a client to that tunnel runs **VS Code Server and the extension
+  host on this machine**, so the normal chat harness — tools, terminal, MCP
+  servers, model picker — executes here against the local workspace copies.
+- The bridges prefer the workspace extension host (`extensionKind:
+  ["workspace", "ui"]`), so in a remote window they run on this machine and
+  serve this machine's 9Router models. `9Router Bridge: Add This Machine as
+  Provider` writes a group with `baseUrl: http://127.0.0.1:20128/v1` for the
+  window that runs it (remote or local).
+- The Agent Host path (`code agent host --tunnel`) remains for the Agents
+  window harnesses (Copilot/Claude/Codex) with handoff support.
+
 ## OAuth Onboarding and Token Refresh Lifecycle
 
 ```mermaid

@@ -13,6 +13,7 @@ function statusClass(running) {
 
 export default function RemoteAgentPageClient() {
   const [data, setData] = useState(null);
+  const [tunnel, setTunnel] = useState(null);
   const [logs, setLogs] = useState("");
   const [showLogs, setShowLogs] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -24,14 +25,55 @@ export default function RemoteAgentPageClient() {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await fetch("/api/remote/agent", { cache: "no-store" });
-      const payload = await response.json();
+      const [agentResponse, tunnelResponse] = await Promise.all([
+        fetch("/api/remote/agent", { cache: "no-store" }),
+        fetch("/api/remote/tunnel", { cache: "no-store" }),
+      ]);
+      const payload = await agentResponse.json();
+      const tunnelPayload = await tunnelResponse.json();
       setData(payload);
-      setError(payload.error || "");
+      setTunnel(tunnelPayload.tunnel || null);
+      if (typeof tunnelPayload.logs === "string") {
+        setLogs(tunnelPayload.logs);
+      }
+      setError(payload.error || tunnelPayload.error || "");
     } catch (err) {
       setError(String(err?.message || err));
     }
   }, []);
+
+  const startTunnel = useCallback(async (service = false) => {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/remote/tunnel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to start the tunnel");
+      }
+      setTunnel(payload.tunnel || null);
+      setShowLogs(true);
+      await refresh();
+    } catch (err) {
+      setError(String(err?.message || err));
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
+
+  const stopTunnel = useCallback(async () => {
+    setBusy(true);
+    try {
+      await fetch("/api/remote/tunnel", { method: "DELETE" });
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
 
   useEffect(() => {
     // Initial load; refresh() awaits its fetch before updating state.
@@ -146,6 +188,86 @@ export default function RemoteAgentPageClient() {
           <p className="text-xs text-yellow-600 dark:text-yellow-400">{error}</p>
         </div>
       ) : null}
+
+      <Card>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold">Remote workspace tunnel (VS Code harness)</h2>
+            <p className="text-sm text-text-muted">
+              Connect a VS Code client to this machine as a normal remote workspace. VS Code Server
+              and the extension host run here, so the built-in chat harness, tools, terminal and MCP
+              servers all run on this machine — with this machine&apos;s files and models.
+            </p>
+            {tunnel?.url ? (
+              <p className="mt-1 break-all text-xs text-text-muted">
+                {tunnel.url}
+                {tunnel.running ? " · running" : " · stopped"}
+              </p>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${statusClass(Boolean(tunnel?.running))}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${tunnel?.running ? "bg-green-500" : "bg-text-muted"}`} />
+              {tunnel?.running ? "tunnel on" : "tunnel off"}
+            </span>
+            {tunnel?.running ? (
+              <Button size="sm" variant="danger" icon="stop" loading={busy} onClick={stopTunnel}>
+                Stop
+              </Button>
+            ) : (
+              <>
+                <Button size="sm" icon="cloud_upload" loading={busy} onClick={() => startTunnel(false)}>
+                  Start tunnel
+                </Button>
+                <Button size="sm" variant="secondary" icon="settings_ethernet" loading={busy} onClick={() => startTunnel(true)}>
+                  Install as service
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-border bg-surface-2/40 p-3 text-sm">
+          <p className="font-medium">Connect and use this machine&apos;s harness</p>
+          <ol className="mt-1 list-decimal space-y-1 pl-5 text-text-muted">
+            {tunnel?.deviceCode ? (
+              <li className="text-yellow-600 dark:text-yellow-400">
+                Authorize this machine: open <code className="text-text-main">https://github.com/login/device</code> and
+                enter code <code className="text-text-main">{tunnel.deviceCode}</code>
+              </li>
+            ) : null}
+            <li>
+              Browser: open <code className="text-text-main">{tunnel?.url || "https://vscode.dev/tunnel/<name>"}</code>.
+              Desktop: install the <em>Remote - Tunnels</em> extension and run <em>Remote Tunnels: Connect to Tunnel</em>.
+            </li>
+            <li>Open a folder on this machine — e.g. one of the workspace copies below.</li>
+            <li>
+              In that remote window, install/enable the <strong>9Router Provider Bridge</strong> and run
+              <em> 9Router Bridge: Add This Machine as Provider</em> (group base URL{" "}
+              <code className="text-text-main">http://127.0.0.1:20128/v1</code>).
+            </li>
+            <li>Pick any 9Router model in the normal Chat model picker — tools, MCP and the terminal run here.</li>
+          </ol>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" icon="content_copy" onClick={() => copy(tunnel?.url || `https://vscode.dev/tunnel/${tunnel?.name || "<name>"}`)}>
+              Copy tunnel URL
+            </Button>
+            <Button size="sm" variant="ghost" icon="article" onClick={() => setShowLogs((value) => !value)}>
+              {showLogs ? "Hide tunnel logs" : "Tunnel logs"}
+            </Button>
+            {showLogs ? (
+              <Button size="sm" variant="ghost" icon="refresh" onClick={refresh}>
+                Refresh
+              </Button>
+            ) : null}
+          </div>
+          {showLogs ? (
+            <pre className="mt-2 max-h-64 overflow-auto rounded-lg border border-border bg-surface-3/60 p-2 font-mono text-[10px] text-text-main">
+              {logs || "No tunnel output yet — the first start asks for GitHub/Microsoft auth here."}
+            </pre>
+          ) : null}
+        </div>
+      </Card>
 
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3">
