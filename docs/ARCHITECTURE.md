@@ -409,6 +409,27 @@ dashboard-auth endpoints under `/api/local`:
 - API: `GET/POST/DELETE /api/remote/agent`, `GET /api/remote/agent/logs`
   (dashboard-auth).
 
+## Cloud Agent Sessions
+
+`src/lib/remote/sessions.js` + `/api/v1/agent/sessions*` (API-key auth) run
+agent sessions on the 9Router machine:
+
+- A session binds to a workspace copy (`~/.9router/remote/workspaces`) and a
+  harness CLI (`claude` preferred, `opencode` fallback) spawned with the
+  harness env pointed at the local 9Router (`ANTHROPIC_BASE_URL`,
+  `OPENAI_BASE_URL`, API key), so its models come from 9Router
+  providers/combos/pools.
+- `claude -p --output-format stream-json --include-partial-messages` output is
+  parsed into SSE events (`text`, `thinking`, `tool`, `result`, `done`); the
+  transcript and harness session id are persisted, so sessions survive client
+  disconnects.
+- `--resume <id>` continues a session and `--resume <id> --fork-session` backs
+  the fork endpoint; stop kills the running harness.
+- The VS Code bridge registers this as a native chat session type (`9router`)
+  through the `chatSessionsProvider` proposed API: session list, fork, model
+  option group and streaming markdown are all built-in UI, which gives the
+  same "continue elsewhere" experience as cloud sessions but on this host.
+
 ## OAuth Onboarding and Token Refresh Lifecycle
 
 ```mermaid
