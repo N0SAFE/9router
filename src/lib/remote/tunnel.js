@@ -1,4 +1,4 @@
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
@@ -64,28 +64,54 @@ function sanitizeName(value) {
     .slice(0, 40) || "9router";
 }
 
-/** Parse the vscode.dev tunnel URL, machine name and device code out of tunnel logs. */
+/** Parse the newest vscode.dev tunnel URL, machine name and device code from tunnel logs. */
 export function parseTunnelLog(text) {
   const result = { url: null, name: null, deviceCode: null };
   if (typeof text !== "string") {
     return result;
   }
-  const urlMatch = text.match(/https:\/\/vscode\.dev\/tunnel\/([a-zA-Z0-9._-]+)/);
-  if (urlMatch) {
-    result.url = urlMatch[0];
-    result.name = urlMatch[1];
+  const urls = [...text.matchAll(/https:\/\/vscode\.dev\/tunnel\/([a-zA-Z0-9._-]+)/g)];
+  if (urls.length > 0) {
+    const last = urls[urls.length - 1];
+    result.url = last[0];
+    result.name = last[1];
   } else {
-    const nameMatch = text.match(/tunnel\/([a-zA-Z0-9._-]+)\s*$/m);
-    if (nameMatch) {
-      result.name = nameMatch[1];
-      result.url = `https://vscode.dev/tunnel/${nameMatch[1]}`;
+    const names = [...text.matchAll(/tunnel\/([a-zA-Z0-9._-]+)\s*$/gm)];
+    if (names.length > 0) {
+      const last = names[names.length - 1];
+      result.name = last[1];
+      result.url = `https://vscode.dev/tunnel/${last[1]}`;
     }
   }
-  const codeMatch = text.match(/use code\s+([A-Z0-9]{4,8}-[A-Z0-9]{4,8})/i);
-  if (codeMatch) {
-    result.deviceCode = codeMatch[1].toUpperCase();
+  // Device codes are re-issued per auth attempt: keep the newest one.
+  const codes = [...text.matchAll(/use code\s+([A-Z0-9]{4,8}-[A-Z0-9]{4,8})/gi)];
+  if (codes.length > 0) {
+    result.deviceCode = codes[codes.length - 1][1].toUpperCase();
   }
   return result;
+}
+
+/** CLI-reported connection state (Connected/Disconnected + tunnel id). */
+export function readTunnelCliStatus() {
+  for (const candidate of ["code-insiders", "code"]) {
+    try {
+      const raw = execFileSync(candidate, ["tunnel", "status"], {
+        timeout: 5000,
+        env: { ...process.env, PATH: EXTENDED_PATH },
+      }).toString();
+      const parsed = JSON.parse(raw);
+      const state = parsed?.tunnel?.tunnel || null;
+      return {
+        status: state,
+        connected: state === "Connected" || Boolean(parsed?.tunnel?.tunnel_id),
+        tunnelId: parsed?.tunnel?.tunnel_id || null,
+        cliName: candidate,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return { status: null, connected: false, tunnelId: null, cliName: null };
 }
 
 export function readTunnelState() {
@@ -93,15 +119,29 @@ export function readTunnelState() {
     const raw = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     const log = readTunnelLogs(200);
     const parsed = parseTunnelLog(log);
+    const cliStatus = readTunnelCliStatus();
     return {
       ...raw,
       ...(parsed.url ? { url: parsed.url } : {}),
       ...(parsed.name ? { name: parsed.name } : {}),
       ...(parsed.deviceCode ? { deviceCode: parsed.deviceCode } : {}),
+      connected: cliStatus.connected,
+      cliStatus: cliStatus.status,
+      needsAuth: !cliStatus.connected && Boolean(parsed.deviceCode),
       running: isAlive(raw.pid),
     };
   } catch {
-    return { running: false, pid: null, name: null, url: null, deviceCode: null, cli: null, startedAt: null };
+    return {
+      running: false,
+      connected: false,
+      needsAuth: false,
+      pid: null,
+      name: null,
+      url: null,
+      deviceCode: null,
+      cli: null,
+      startedAt: null,
+    };
   }
 }
 
@@ -155,10 +195,37 @@ export async function startWorkspaceTunnel({ name, service = false } = {}) {
     name: machineName,
     service,
     url: `https://vscode.dev/tunnel/${machineName}`,
+    autoRestart: true,
     startedAt: new Date().toISOString(),
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
   return { ...state, running: true };
+}
+
+/**
+ * Restart the tunnel at boot when it was started from the dashboard and the
+ * process did not survive (systemd restarts kill the service cgroup).
+ */
+export async function ensureTunnelFromState() {
+  let state = null;
+  try {
+    state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return { restarted: false, reason: "no_state" };
+  }
+  if (!state?.autoRestart || state.service) {
+    return { restarted: false, reason: "not_managed" };
+  }
+  const current = readTunnelState();
+  if (current.running || current.connected) {
+    return { restarted: false, reason: "already_running" };
+  }
+  try {
+    await startWorkspaceTunnel({ name: state.name });
+    return { restarted: true, name: state.name };
+  } catch (error) {
+    return { restarted: false, reason: error?.code || error?.message };
+  }
 }
 
 export function stopWorkspaceTunnel() {

@@ -206,9 +206,15 @@ export default function RemoteAgentPageClient() {
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${statusClass(Boolean(tunnel?.running))}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${tunnel?.running ? "bg-green-500" : "bg-text-muted"}`} />
-              {tunnel?.running ? "tunnel on" : "tunnel off"}
+            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${statusClass(Boolean(tunnel?.connected))}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${tunnel?.connected ? "bg-green-500" : tunnel?.needsAuth ? "bg-amber-500" : "bg-text-muted"}`} />
+              {tunnel?.connected
+                ? "connected"
+                : tunnel?.needsAuth
+                  ? "waiting for GitHub auth"
+                  : tunnel?.running
+                    ? "starting…"
+                    : "off"}
             </span>
             {tunnel?.running ? (
               <Button size="sm" variant="danger" icon="stop" loading={busy} onClick={stopTunnel}>
