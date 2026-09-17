@@ -219,6 +219,32 @@ export async function stopAgentHost() {
   return { ...state, running: false };
 }
 
+/**
+ * Bring the agent host back after a service restart when it was started from
+ * the dashboard (systemd kills the service cgroup processes on restart).
+ */
+export async function ensureAgentHostFromState() {
+  let state = null;
+  try {
+    state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return { restarted: false, reason: "no_state" };
+  }
+  if (!state?.name) {
+    return { restarted: false, reason: "not_managed" };
+  }
+  const current = await getAgentHostState();
+  if (current.running) {
+    return { restarted: false, reason: "already_running" };
+  }
+  try {
+    await startAgentHost({ name: state.name });
+    return { restarted: true, name: state.name };
+  } catch (error) {
+    return { restarted: false, reason: error?.message || String(error) };
+  }
+}
+
 export function readAgentHostLogs(lines = 200) {
   try {
     return fs.readFileSync(LOG_FILE, "utf8").split("\n").slice(-lines).join("\n");
