@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Button, Drawer, Input, Select, Toggle } from "@/shared/components";
+import { Badge, Button, Input, Toggle } from "@/shared/components";
+import Drawer from "@/shared/components/Drawer";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { cn } from "@/shared/utils/cn";
