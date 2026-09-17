@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { getRequestDetailsInRange, getUsageHistory } from "@/lib/usageDb";
 import { analyzeRequestDetails } from "@/lib/usage/insights";
-import { mergeUsageRows } from "@/lib/usage/mergeDetails";
+import { loadFilteredUsageRequests } from "@/lib/usage/loadFilteredRequests";
+import { parseUsageFilters } from "@/lib/usage/usageFilters.js";
 import { getPricingForModel, calculateCostFromTokens } from "open-sse/providers/pricing.js";
 
 const PERIOD_MS = {
@@ -34,37 +34,32 @@ function estimateCost(row) {
 
 /**
  * GET /api/usage/insights
- * Query: period (today|1h|24h|7d|30d|all), provider, model, limit (<=2000), startDate, endDate
+ * Query: period, provider, model, connectionId, status, apiKeyId, endpoint, q,
+ *        limit (<=2000), startDate, endDate
  */
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const period = searchParams.get("period") || "7d";
-    const provider = searchParams.get("provider") || undefined;
-    const model = searchParams.get("model") || undefined;
     const limitRaw = parseInt(searchParams.get("limit"), 10);
     const limit = Number.isFinite(limitRaw) ? limitRaw : 500;
 
+    const filters = parseUsageFilters(searchParams);
     const startDate = searchParams.get("startDate") || startDateFor(period);
     const endDate = searchParams.get("endDate") || undefined;
 
-    const filter = { provider, model, startDate: startDate || undefined, endDate };
-    const [details, history] = await Promise.all([
-      getRequestDetailsInRange(filter, limit),
-      getUsageHistory(filter),
-    ]);
+    const { rows, startDate: rangeStart, endDate: rangeEnd, details, history } =
+      await loadFilteredUsageRequests({ period, startDate, endDate, filters, limit });
 
-    // Merge so requests made while observability was off still count.
-    const rows = mergeUsageRows(details, history).slice(0, Math.max(limit, 2000));
     const insights = analyzeRequestDetails(rows, { costEstimator: estimateCost });
 
     return NextResponse.json(
       {
         period,
-        startDate,
-        endDate: endDate || null,
+        startDate: rangeStart,
+        endDate: rangeEnd || null,
         sampled: rows.length,
-        sources: { details: details.length, history: history.length },
+        sources: { details, history },
         ...insights,
       },
       { headers: { "Cache-Control": "no-store" } }

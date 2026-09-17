@@ -18,6 +18,8 @@ import dynamic from "next/dynamic";
 // Lazy-load: keeps @xyflow/react out of the shared bundle until topology renders
 const ProviderTopology = dynamic(() => import("@/app/(dashboard)/dashboard/usage/components/ProviderTopology"), { ssr: false });
 import UsageChart from "@/app/(dashboard)/dashboard/usage/components/UsageChart";
+import UsageFilterBar from "@/app/(dashboard)/dashboard/usage/components/UsageFilterBar";
+import { useUsageFilters } from "@/app/(dashboard)/dashboard/usage/components/useUsageFilters";
 
 function timeAgo(timestamp) {
   const diff = Math.floor((Date.now() - new Date(timestamp)) / 1000);
@@ -318,6 +320,7 @@ const toDetailPeriod = (value) => DETAIL_PERIOD[value] || "7d";
 export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { filters, queryString, patchFilters, clearFilters, activeCount } = useUsageFilters();
 
   const sortBy = searchParams.get("sortBy") || "rawModel";
   const sortOrder = searchParams.get("sortOrder") || "asc";
@@ -376,7 +379,8 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       setFetching(true);
     }
 
-    fetch(`/api/usage/stats?period=${period}`)
+    const suffix = queryString ? `&${queryString}` : "";
+    fetch(`/api/usage/stats?period=${period}${suffix}`, { cache: "no-store" })
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (data) {
@@ -389,7 +393,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         setLoading(false);
         setFetching(false);
       });
-  }, [period]);
+  }, [period, queryString]);
 
   // SSE connection - real-time updates for activeRequests + recentRequests only
   useEffect(() => {
@@ -562,7 +566,18 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   );
 
   return (
-    <div className="flex min-w-0 flex-col gap-6">
+    <div className="flex min-w-0 flex-col gap-4">
+      {/* Global filters — shared with the Details tab through the URL */}
+      <div className="sticky top-0 z-20 flex flex-wrap items-center gap-2 rounded-xl border border-border-subtle bg-surface/85 px-2 py-1.5 backdrop-blur">
+        <span className="material-symbols-outlined text-[16px] text-text-muted">filter_alt</span>
+        <UsageFilterBar period={period} filters={filters} onPatch={patchFilters} onClear={clearFilters} />
+        {activeCount > 0 && (
+          <span className="ml-auto text-[11px] text-text-muted">
+            {activeCount} active filter{activeCount > 1 ? "s" : ""} · cards, chart and insights follow the selection
+          </span>
+        )}
+      </div>
+
       {/* Period selector (hidden when controlled by parent) */}
       {!hidePeriodSelector && (
         <div className="flex w-full items-center gap-2 sm:w-auto sm:self-end">
@@ -618,7 +633,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       {loading ? spinner : <RoutingPanel period={period} periodMap={toDetailPeriod} onDrillDown={drillDown} />}
 
       {/* Token / Cost chart - sync period */}
-      {loading ? spinner : <UsageChart period={period} onSelectPeriod={() => drillDown({})} />}
+      {loading ? spinner : <UsageChart period={period} filters={queryString} onSelectPeriod={() => drillDown({})} />}
 
       {/* Table with dropdown selector */}
       <div className="flex flex-col gap-3">

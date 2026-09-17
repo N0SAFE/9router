@@ -2,6 +2,15 @@ import { EventEmitter } from "events";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getMeta, setMeta } from "../helpers/metaStore.js";
+import {
+  LOCAL_NO_KEY,
+  aggregateUsageStats,
+  bucketChartRows,
+  hasActiveFilters,
+  matchesJsFilters,
+  normalizeHistoryRow,
+  resolvePeriodStart,
+} from "@/lib/usage/usageFilters.js";
 
 function maskApiKey(key) {
   if (!key || typeof key !== "string") return null;
@@ -331,6 +340,7 @@ export async function getUsageHistory(filter = {}) {
   if (filter.model) { conds.push("model = ?"); params.push(filter.model); }
   if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
   if (filter.status) { conds.push("status = ?"); params.push(filter.status); }
+  if (filter.apiKey) { conds.push("apiKey = ?"); params.push(filter.apiKey); }
   if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
   if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
 
@@ -358,7 +368,12 @@ function loadDaysInRange(adapter, maxDays) {
   return adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
 }
 
-export async function getUsageStats(period = "all") {
+export async function getUsageStats(period = "all", filters = null) {
+  // Aggregated rollups cannot answer status/search/api-key filters, so a
+  // filtered request rebuilds the aggregates from raw history rows instead.
+  if (filters && hasActiveFilters(filters)) {
+    return getFilteredUsageStats(period, filters);
+  }
   const db = await getAdapter();
 
   const [{ getProviderConnections }, { getApiKeys }, { getProviderNodes }] = await Promise.all([
@@ -675,7 +690,135 @@ export async function getUsageStats(period = "all") {
   return stats;
 }
 
-export async function getChartData(period = "7d") {
+/* ------------------------------------------------------------------------- *
+ * Filtered usage views (provider/model/connection/status/key/endpoint/search)
+ * ------------------------------------------------------------------------- */
+
+async function loadStatsLookups() {
+  const [{ getProviderConnections }, { getApiKeys }, { getProviderNodes }] = await Promise.all([
+    import("./connectionsRepo.js"),
+    import("./apiKeysRepo.js"),
+    import("./nodesRepo.js"),
+  ]);
+  const connectionMap = {};
+  try {
+    for (const c of await getProviderConnections()) connectionMap[c.id] = c.name || c.email || c.id;
+  } catch { /* no connections */ }
+  const apiKeyMap = {};
+  try {
+    for (const k of await getApiKeys()) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
+  } catch { /* no keys */ }
+  const providerNodeNameMap = {};
+  try {
+    for (const n of await getProviderNodes()) if (n.id && n.name) providerNodeNameMap[n.id] = n.name;
+  } catch { /* no nodes */ }
+  return { connectionMap, apiKeyMap, providerNodeNameMap };
+}
+
+/** Resolve filters.apiKeyId (key id, name or "local-no-key") to the raw key. */
+async function resolveApiKeyRaw(filters = {}) {
+  if (filters.apiKey) return filters.apiKey;
+  if (!filters.apiKeyId || filters.apiKeyId === LOCAL_NO_KEY) return null;
+  try {
+    const { getApiKeys } = await import("./apiKeysRepo.js");
+    const keys = await getApiKeys();
+    const found = keys.find((k) => k.id === filters.apiKeyId || k.name === filters.apiKeyId);
+    return found?.key || null;
+  } catch {
+    return null;
+  }
+}
+
+const FILTERED_ROW_LIMIT = 100_000;
+
+async function loadFilteredHistoryRows(db, { periodStart, endDate, filters = {} }) {
+  const conds = [];
+  const params = [];
+  if (periodStart) { conds.push("timestamp >= ?"); params.push(periodStart); }
+  if (endDate) { conds.push("timestamp <= ?"); params.push(new Date(endDate).toISOString()); }
+  if (filters.provider) { conds.push("provider = ?"); params.push(filters.provider); }
+  if (filters.model) { conds.push("model = ?"); params.push(filters.model); }
+  if (filters.connectionId) { conds.push("connectionId = ?"); params.push(filters.connectionId); }
+  if (filters.status) {
+    if (filters.status === "success") {
+      conds.push("(status IS NULL OR status IN ('ok', 'success'))");
+    } else if (filters.status === "failed") {
+      conds.push("status IS NOT NULL AND status NOT IN ('ok', 'success')");
+    } else {
+      conds.push("status = ?");
+      params.push(filters.status);
+    }
+  }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const rows = db.all(
+    `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens,
+            promptTokens, completionTokens
+     FROM usageHistory ${where} ORDER BY id DESC LIMIT ${FILTERED_ROW_LIMIT}`,
+    params
+  );
+  return rows.map((row) => normalizeHistoryRow({ ...row, tokens: parseJson(row.tokens, {}) }));
+}
+
+function buildLastTenMinutes(rows, now = Date.now()) {
+  const hourMs = 60 * 1000;
+  const currentMinuteStart = Math.floor(now / hourMs) * hourMs;
+  const buckets = [];
+  const bucketMap = new Map();
+  for (let i = 0; i < 10; i += 1) {
+    const ts = currentMinuteStart - (9 - i) * hourMs;
+    const bucket = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
+    bucketMap.set(ts, bucket);
+    buckets.push(bucket);
+  }
+  for (const row of rows) {
+    if (!row.timestamp) continue;
+    const minuteStart = Math.floor(new Date(row.timestamp).getTime() / hourMs) * hourMs;
+    const bucket = bucketMap.get(minuteStart);
+    if (!bucket) continue;
+    bucket.requests += 1;
+    bucket.promptTokens += row.promptTokens;
+    bucket.completionTokens += row.completionTokens;
+    bucket.cost += row.cost;
+  }
+  return buckets;
+}
+
+/**
+ * Rebuild the UsageStats shape from raw history rows matching the filters.
+ * Live fields (active/pending/recent/error) stay global by design.
+ */
+export async function getFilteredUsageStats(period = "all", filters = {}) {
+  const db = await getAdapter();
+  const lookups = await loadStatsLookups();
+  const periodStart = resolvePeriodStart(period);
+  const rows = await loadFilteredHistoryRows(db, { periodStart, endDate: filters.endDate, filters });
+  const apiKeyRaw = await resolveApiKeyRaw(filters);
+  const filteredRows = rows.filter((row) => matchesJsFilters(row, filters, { apiKeyRaw }));
+
+  const stats = aggregateUsageStats(filteredRows, lookups);
+  const live = await getActiveRequests();
+  stats.pending = pendingRequests;
+  stats.activeRequests = live.activeRequests;
+  stats.recentRequests = live.recentRequests;
+  stats.errorProvider = live.errorProvider;
+  stats.last10Minutes = buildLastTenMinutes(filteredRows);
+  return stats;
+}
+
+/** Chart buckets for the filtered view (daily rollups carry no filters). */
+export async function getFilteredChartData(period = "7d", filters = {}) {
+  const db = await getAdapter();
+  const periodStart = resolvePeriodStart(period);
+  const rows = await loadFilteredHistoryRows(db, { periodStart, endDate: filters.endDate, filters });
+  const apiKeyRaw = await resolveApiKeyRaw(filters);
+  const filteredRows = rows.filter((row) => matchesJsFilters(row, filters, { apiKeyRaw }));
+  return bucketChartRows(filteredRows, { period });
+}
+
+export async function getChartData(period = "7d", filters = null) {
+  if (filters && hasActiveFilters(filters)) {
+    return getFilteredChartData(period, filters);
+  }
   const db = await getAdapter();
   const now = Date.now();
 
