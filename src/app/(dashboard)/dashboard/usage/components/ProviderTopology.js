@@ -19,9 +19,11 @@ import { fmtCompact, fmtTime } from "./format";
 const FE_ACTIVE_TIMEOUT_MS = 60000;
 const FE_ACTIVE_TICK_MS = 1000;
 
-// Kame + electric particles along active edges
+// Kame + electric particles along active edges. Counts/speed scale with the
+// number of active connections (or in-flight requests) the edge carries.
 const KAME_PARTICLE_COUNT = 6;
 const SPARK_COUNT = 5;
+const MAX_FLOW_BOOST = 3;
 
 const MODES = [
   { value: "providers", label: "Providers" },
@@ -44,15 +46,17 @@ function providerOfModel(model) {
 
 // Custom provider node - rectangle with image + name
 function ProviderNode({ data }) {
-  const { label, color, imageUrl, textIcon, active, activeCount, clickable, subtitle, role } = data;
+  const { label, color, imageUrl, textIcon, active, connectionCount, requestCount, clickable, subtitle, role } = data;
   const [imgError, setImgError] = useState(false);
   const isSource = role === "source";
+  // Glow grows with the number of connections this provider is using.
+  const boost = Math.max(0, Math.min(MAX_FLOW_BOOST, (Number(connectionCount) || 0) - 1));
   return (
     <div
       className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg border-2 transition-all duration-300 bg-bg"
       style={{
         borderColor: active ? color : "var(--color-border)",
-        boxShadow: active ? `0 0 16px ${color}40` : "none",
+        boxShadow: active ? `0 0 ${16 + boost * 8}px ${color}${boost > 0 ? "66" : "40"}` : "none",
         minWidth: "150px",
         cursor: clickable ? "pointer" : undefined,
       }}
@@ -103,14 +107,14 @@ function ProviderNode({ data }) {
         {subtitle && <span className="block text-[11px] text-text-muted">{subtitle}</span>}
       </div>
 
-      {/* Active indicator: live request count for this provider, then ping dot */}
-      {active && activeCount > 0 && (
+      {/* Active indicator: connections in use for this provider, then ping dot */}
+      {active && connectionCount > 0 && (
         <span
           className="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums"
           style={{ backgroundColor: `${color}20`, color }}
-          title={`${activeCount} in-flight request${activeCount > 1 ? "s" : ""}`}
+          title={`${connectionCount} connection${connectionCount > 1 ? "s" : ""} in use${requestCount > 0 ? ` · ${requestCount} in-flight request${requestCount > 1 ? "s" : ""}` : ""}`}
         >
-          {activeCount}
+          {connectionCount}
         </span>
       )}
       {active && (
@@ -246,7 +250,7 @@ function RouterNode({ data }) {
       {data.activeCount > 0 && (
         <span
           className="ml-2 px-1.5 py-0.5 rounded-full bg-yellow-400 text-black text-xs font-bold tabular-nums topology-router-badge"
-          title={`${data.activeCount} in-flight request${data.activeCount > 1 ? "s" : ""} across ${data.activeProviders || 1} provider${(data.activeProviders || 1) > 1 ? "s" : ""}`}
+          title={`${data.activeCount} provider${data.activeCount > 1 ? "s" : ""} in use${data.activeRequests > 0 ? ` · ${data.activeRequests} in-flight request${data.activeRequests > 1 ? "s" : ""}` : ""}`}
         >
           {data.activeCount}
         </span>
@@ -283,6 +287,13 @@ function TopologyEdge({
   const active = !!data?.active;
   const stroke = style.stroke || "var(--color-border)";
   const filterId = `topo-electric-${id}`;
+  // 1 connection → base flow; every extra connection up to MAX_FLOW_BOOST makes
+  // the beam thicker, faster and denser.
+  const intensity = Math.max(1, Number(data?.intensity) || 1);
+  const boost = Math.min(MAX_FLOW_BOOST, intensity - 1);
+  const particleCount = KAME_PARTICLE_COUNT + boost * 2;
+  const sparkCount = SPARK_COUNT + boost;
+  const speed = 1 + boost * 0.28;
 
   if (!active) {
     return (
@@ -313,7 +324,7 @@ function TopologyEdge({
         d={edgePath}
         fill="none"
         stroke="#22d3ee"
-        strokeWidth={10}
+        strokeWidth={10 + boost * 3}
         strokeOpacity={0.35}
         strokeLinecap="round"
         filter={`url(#${filterId})`}
@@ -323,7 +334,7 @@ function TopologyEdge({
         d={edgePath}
         fill="none"
         stroke="#4ade80"
-        strokeWidth={5}
+        strokeWidth={5 + boost * 1.6}
         strokeOpacity={0.85}
         strokeLinecap="round"
         filter={`url(#${filterId})`}
@@ -332,10 +343,10 @@ function TopologyEdge({
       <BaseEdge
         id={id}
         path={edgePath}
-        style={{ stroke: "#f8fafc", strokeWidth: 2.2, opacity: 1 }}
+        style={{ stroke: "#f8fafc", strokeWidth: 2.2 + boost * 1.1, opacity: 1 }}
         className="topology-edge-kame"
       />
-      {Array.from({ length: KAME_PARTICLE_COUNT }, (_, i) => (
+      {Array.from({ length: particleCount }, (_, i) => (
         <circle
           key={`${id}-p-${i}`}
           r={i % 2 === 0 ? 4 : 2.5}
@@ -343,19 +354,19 @@ function TopologyEdge({
           opacity={0.95}
           style={{ filter: "drop-shadow(0 0 4px #22d3ee)" }}
         >
-          <animateMotion dur={`${0.4 + i * 0.08}s`} repeatCount="indefinite" path={edgePath} begin={`${i * 0.09}s`} />
+          <animateMotion dur={`${(0.4 + i * 0.08) / speed}s`} repeatCount="indefinite" path={edgePath} begin={`${i * 0.09}s`} />
         </circle>
       ))}
-      {Array.from({ length: SPARK_COUNT }, (_, i) => (
+      {Array.from({ length: sparkCount }, (_, i) => (
         <circle key={`${id}-s-${i}`} r={1.8} fill="#e0f2fe" opacity={0}>
           <animate
             attributeName="opacity"
             values="0;1;0;0;1;0"
-            dur={`${0.35 + (i % 3) * 0.1}s`}
+            dur={`${(0.35 + (i % 3) * 0.1) / speed}s`}
             begin={`${i * 0.07}s`}
             repeatCount="indefinite"
           />
-          <animateMotion dur={`${0.28 + i * 0.05}s`} repeatCount="indefinite" path={edgePath} begin={`${i * 0.11}s`} />
+          <animateMotion dur={`${(0.28 + i * 0.05) / speed}s`} repeatCount="indefinite" path={edgePath} begin={`${i * 0.11}s`} />
         </circle>
       ))}
     </g>
@@ -394,7 +405,15 @@ const EDGE_STYLE = (active, last, error) => {
 };
 
 // Place N nodes evenly along an ellipse around the router center.
-function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable = false, activeCounts = new Map(), totalActive = 0) {
+function buildProvidersLayout(
+  providers,
+  activeSet,
+  lastSet,
+  errorSet,
+  clickable = false,
+  activeConnections = new Map(),
+  activeRequestCounts = new Map()
+) {
   const nodeW = 180;
   const nodeH = 30;
   const routerW = 120;
@@ -414,11 +433,12 @@ function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable
 
   const nodes = [];
   const edges = [];
+  const totalActiveRequests = [...activeRequestCounts.values()].reduce((sum, value) => sum + value, 0);
   nodes.push({
     id: "router",
     type: "router",
     position: { x: -routerW / 2, y: -routerH / 2 },
-    data: { activeCount: totalActive, activeProviders: activeSet.size },
+    data: { activeCount: activeSet.size, activeRequests: totalActiveRequests },
     draggable: false,
   });
 
@@ -428,14 +448,17 @@ function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable
     const last = !active && lastSet.has(p.provider?.toLowerCase());
     const error = !active && errorSet.has(p.provider?.toLowerCase());
     const nodeId = `provider-${p.provider}`;
-    const providerActiveCount = activeCounts.get((p.provider || "").toLowerCase()) || 0;
+    const providerKey = (p.provider || "").toLowerCase();
+    const connectionCount = activeConnections.get(providerKey)?.size || 0;
+    const requestCount = activeRequestCounts.get(providerKey) || 0;
     const data = {
       label: (config.name !== p.provider ? config.name : null) || p.nodeName || p.name || p.provider,
       color: config.color || "#6b7280",
       imageUrl: getProviderImageUrl(p.provider),
       textIcon: config.textIcon || (p.provider || "?").slice(0, 2).toUpperCase(),
       active,
-      activeCount: providerActiveCount,
+      connectionCount,
+      requestCount,
       clickable,
     };
 
@@ -469,7 +492,7 @@ function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable
       target: nodeId,
       targetHandle,
       animated: false,
-      data: { active },
+      data: { active, intensity: connectionCount },
       style: EDGE_STYLE(active, last, error),
     });
   });
@@ -555,7 +578,7 @@ function buildPoolsLayout(providers, activeRequests = []) {
         target: connId,
         targetHandle: "left",
         animated: false,
-        data: { active },
+        data: { active, intensity: activeCounts.get(accountKey) || 0 },
         label: conn.requests ? `${fmtCompact(conn.requests)} req` : undefined,
         style: EDGE_STYLE(active, false, (conn.failures || 0) > 0 && !active),
       });
@@ -737,19 +760,27 @@ export default function ProviderTopology({
     return filtered;
   }, [rawActiveSet, tick]);
 
-  // In-flight requests per provider and overall. One entry per (account, model)
-  // can carry a count > 1 when the same provider serves several concurrent
-  // sessions, so count requests rather than distinct providers.
+  // In-flight requests per provider and per connection, plus the distinct
+  // connections (accounts) each provider is using. One active entry is per
+  // (account, model) and may carry count > 1 for concurrent sessions.
   const activeTotals = useMemo(() => {
-    const byProvider = new Map();
+    const requestsByProvider = new Map();
+    const connectionsByProvider = new Map();
     let total = 0;
     for (const request of activeRequests || []) {
       const provider = (request.provider || "").toLowerCase();
+      if (!provider) continue;
       const count = Number(request.count) > 0 ? Number(request.count) : 1;
       total += count;
-      if (provider) byProvider.set(provider, (byProvider.get(provider) || 0) + count);
+      requestsByProvider.set(provider, (requestsByProvider.get(provider) || 0) + count);
+      let accounts = connectionsByProvider.get(provider);
+      if (!accounts) {
+        accounts = new Set();
+        connectionsByProvider.set(provider, accounts);
+      }
+      accounts.add(request.account || "unknown");
     }
-    return { byProvider, total };
+    return { requestsByProvider, connectionsByProvider, total };
   }, [activeRequests]);
 
   // Routing data powers pools + combos modes.
@@ -781,8 +812,8 @@ export default function ProviderTopology({
       lastSet,
       errorSet,
       clickableProviders,
-      activeTotals.byProvider,
-      activeTotals.total
+      activeTotals.connectionsByProvider,
+      activeTotals.requestsByProvider
     );
   }, [mode, providers, routing, activeSet, lastSet, errorSet, clickableProviders, activeRequests, activeTotals]);
 
