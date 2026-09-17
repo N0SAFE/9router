@@ -24,9 +24,11 @@ const REMOTE_DIR = path.join(os.homedir(), ".9router", "remote");
 const STATE_FILE = path.join(REMOTE_DIR, "agent-host.json");
 const LOG_FILE = path.join(REMOTE_DIR, "agent-host.log");
 const WORKSPACES_DIR = path.join(REMOTE_DIR, "workspaces");
+const AGENT_CLI_DIR = path.join(REMOTE_DIR, "agent-cli");
 
 function ensureDir() {
   fs.mkdirSync(REMOTE_DIR, { recursive: true });
+  fs.mkdirSync(AGENT_CLI_DIR, { recursive: true });
 }
 
 async function findCli() {
@@ -145,7 +147,18 @@ export async function startAgentHost({ name } = {}) {
     // no key available; harness configs / public endpoint still apply
   }
 
-  const args = ["agent", "host", "--tunnel", "--name", machineName];
+  const args = [
+    // Separate CLI data dir: the workspace tunnel and the agent host tunnel
+    // would otherwise fight over the same persisted tunnel (name takeover
+    // shuts the other host down). The endpoint registry stays shared.
+    "--cli-data-dir",
+    AGENT_CLI_DIR,
+    "agent",
+    "host",
+    "--tunnel",
+    "--name",
+    machineName,
+  ];
   let child = spawnAgentHost(cli, args, env);
   // The CLI exits when another agent host is registered without a tunnel
   // (e.g. an editor's local host): take it over and retry once.
