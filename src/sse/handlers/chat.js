@@ -43,6 +43,17 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
+import {
+  checkModelAccess,
+  enforceKeyPolicy,
+  filterComboModels,
+  loadKeyPolicy,
+  policyBlocks,
+  policyErrorResponse,
+  resolveDowngradeTarget,
+} from "@/lib/keys/enforce.js";
+import { beginKeyRequest, endKeyRequest } from "@/lib/keys/concurrency.js";
+import { isConnectionAllowed } from "@/lib/keys/policy.js";
 
 /**
  * Handle chat completion request
@@ -70,7 +81,8 @@ export async function handleChat(request, clientRawRequest = null) {
   // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
   // no combo, alias or provider/model pair, so it must not reach resolution.
   // The capability travels in the anthropic-beta header, forwarded as-is.
-  const { model: modelStr, contextMarker } = stripModelContextMarker(body.model);
+  const { model: modelName, contextMarker } = stripModelContextMarker(body.model);
+  let modelStr = modelName;
   if (contextMarker) body.model = modelStr;
 
   // Request summary is emitted as the unified "▶" line in chatCore (has fmt/thinking/account)
@@ -109,30 +121,77 @@ export async function handleChat(request, clientRawRequest = null) {
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
+  // ── API key access policy (per-key providers/models/budgets/limits/…) ──
+  const keyContext = await loadKeyPolicy(apiKey);
+  const policy = keyContext?.policy || null;
+  if (policy) {
+    const endpoint = request?.url ? new URL(request.url).pathname : "/v1/chat/completions";
+    const comboForPolicy = await getComboModels(modelStr);
+    const preflight = await enforceKeyPolicy({
+      row: keyContext.row,
+      policy,
+      request,
+      endpoint,
+      body,
+      modelStr,
+      isCombo: Boolean(comboForPolicy),
+    });
+    if (!preflight.ok) {
+      log.warn("POLICY", `blocked key "${keyContext.row?.name || keyContext.row?.id}": ${preflight.message}`);
+      return policyErrorResponse(preflight.status || 403, preflight.message, preflight.details);
+    }
+    if (preflight.warnings?.length) {
+      log.warn(
+        "POLICY",
+        `key "${keyContext.row?.name || keyContext.row?.id}" ${policy.dryRun ? "dry-run" : "warn"}: ${preflight.warnings.map((v) => v.message).join(" | ")}`
+      );
+    }
+    if (preflight.clampedMaxTokens) {
+      for (const field of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) {
+        if (body[field] !== undefined) body[field] = preflight.clampedMaxTokens;
+      }
+    }
+    if (preflight.downgradeTarget && preflight.downgradeTarget !== modelStr) {
+      log.warn(
+        "POLICY",
+        `key "${keyContext.row?.name || keyContext.row?.id}" downgraded ${modelStr} → ${preflight.downgradeTarget}`
+      );
+      modelStr = preflight.downgradeTarget;
+      body.model = modelStr;
+    }
+  }
+
   const requiredCapabilities = detectRequiredCapabilities(body);
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
   if (comboModels) {
+    const policyModels = policy ? filterComboModels(policy, modelStr, comboModels) : comboModels;
+    if (policyModels.length === 0) {
+      log.warn("POLICY", `combo "${modelStr}" has no policy-allowed models for this key`);
+      return policyErrorResponse(403, `No model in combo “${modelStr}” is allowed for this API key.`, [
+        { code: "combo_denied", message: `Combo “${modelStr}” has no models allowed by this key's policy.` },
+      ]);
+    }
     // Check for combo-specific strategy first, fallback to global
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
-    const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+    const augmentedModels = augmentModelsWithCapacityAdapter(policyModels, requiredCapabilities, settings);
+    const adapterAdded = augmentedModels.filter((m) => !policyModels.includes(m));
     const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded });
     const runComboModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
-      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace);
+      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
       recordComboModel(trace, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
       return res;
     };
 
     if (comboStrategy === "fusion") {
-      log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
+      log.info("CHAT", `Combo "${modelStr}" with ${policyModels.length} models (strategy: fusion)`);
       return handleFusionChat({
         body,
-        models: comboModels,
+        models: policyModels,
         handleSingleModel: (b, m, isPanel) => {
           let cleanRawReq = clientRawRequest;
           if (isPanel && clientRawRequest) {
@@ -171,7 +230,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded, kind: "capacity" });
     const runAdapterModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
-      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace);
+      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
       recordComboModel(trace, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
       return res;
     };
@@ -185,13 +244,13 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, createRoutingTrace({ requestedModel: modelStr }));
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, createRoutingTrace({ requestedModel: modelStr }), policy);
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, trace = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, trace = null, policy = null) {
   const routing = trace || createRoutingTrace({ requestedModel: modelStr });
   const modelInfo = await getModelInfo(modelStr);
 
@@ -199,27 +258,33 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   if (!modelInfo.provider) {
     const comboModels = await getComboModels(modelStr);
     if (comboModels) {
+      const policyModels = policy ? filterComboModels(policy, modelStr, comboModels) : comboModels;
+      if (policyModels.length === 0) {
+        return policyErrorResponse(403, `No model in combo “${modelStr}” is allowed for this API key.`, [
+          { code: "combo_denied", message: `Combo “${modelStr}” has no models allowed by this key's policy.` },
+        ]);
+      }
       const chatSettings = await getSettings();
       // Check for combo-specific strategy first, fallback to global
       const comboStrategies = chatSettings.comboStrategies || {};
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       const requiredCapabilities = detectRequiredCapabilities(body);
-      const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
-      const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+      const augmentedModels = augmentModelsWithCapacityAdapter(policyModels, requiredCapabilities, chatSettings);
+      const adapterAdded = augmentedModels.filter((m) => !policyModels.includes(m));
       ensureCombo(routing, { name: modelStr, strategy: comboStrategy, adapterAdded, kind: "combo" });
       const runComboModel = async (b, m) => {
         recordComboModel(routing, m, { status: "pending" });
-        const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, routing);
+        const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, routing, policy);
         recordComboModel(routing, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
         return res;
       };
 
       if (comboStrategy === "fusion") {
-        log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
+        log.info("CHAT", `Combo "${modelStr}" with ${policyModels.length} models (strategy: fusion)`);
         return handleFusionChat({
           body,
-          models: comboModels,
+          models: policyModels,
           handleSingleModel: (b, m, isPanel) => {
             let cleanRawReq = clientRawRequest;
             if (isPanel && clientRawRequest) {
@@ -254,6 +319,21 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const { provider, model } = modelInfo;
   recordModelSelection(routing, { provider, model });
   recordPool(routing, { provider });
+
+  // Policy access check for the resolved provider/model (covers bare aliases
+  // that only reveal their provider after resolution).
+  if (policy) {
+    const accessViolations = checkModelAccess(policy, provider, model);
+    if (accessViolations.length > 0) {
+      const target = resolveDowngradeTarget(policy, `${provider}/${model}`);
+      if (target && target !== `${provider}/${model}` && target !== modelStr) {
+        log.warn("POLICY", `downgrading ${provider}/${model} → ${target} (${accessViolations[0].message})`);
+        return handleSingleModelChat(body, target, clientRawRequest, request, apiKey, trace, policy);
+      }
+      log.warn("POLICY", `blocked ${provider}/${model}: ${accessViolations[0].message}`);
+      return policyErrorResponse(403, accessViolations[0].message, accessViolations);
+    }
+  }
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
@@ -305,6 +385,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
     }
 
+    // Policy: connection allowlist — skip disallowed accounts like cooldowns.
+    if (policy && policyBlocks(policy) && !isConnectionAllowed(policy, credentials.connectionId)) {
+      log.warn("POLICY", `[${provider}/${model}] connection ${credentials.connectionName} not allowed → skipping`);
+      excludeConnectionIds.add(credentials.connectionId);
+      if (excludeConnectionIds.size >= 100) {
+        return policyErrorResponse(403, `No connection allowed for this API key on provider “${provider}”.`);
+      }
+      continue;
+    }
+
     // Account selection shown in the unified "▶" line (acc:...)
     if (excludeConnectionIds.size > 0 && log?.debug) {
       log.debug("POOL", `[${provider}/${model}] selected ACC:${credentials.connectionName} · skipped ${excludeConnectionIds.size} cooling account(s)`);
@@ -329,8 +419,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
-    const result = await handleChatCore({
-      body: { ...body, model: `${provider}/${model}` },
+    beginKeyRequest(apiKey);
+    let result;
+    try {
+      result = await handleChatCore({
+        body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       log,
@@ -371,7 +464,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         // "Consecutive" strikes: a success clears the breaker for this pair.
         clearAntigravityStrikes(credentials.connectionId, model);
       }
-    });
+      });
+    } finally {
+      endKeyRequest(apiKey);
+    }
 
     if (result.success) {
       // Account served the request: forget session-scoped failures for it so it
