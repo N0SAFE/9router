@@ -19,8 +19,11 @@ import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
 import KeyAccessControls from "./components/KeyAccessControls";
+import KeyAccessDrawer from "./components/KeyAccessDrawer";
+import { describePolicyState } from "@/lib/keys/policy.js";
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
+  const [accessKey, setAccessKey] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
@@ -1053,6 +1056,15 @@ export default function APIPageClient({ machineId }) {
                   <p className="text-xs text-text-muted mt-1">
                     Created {new Date(key.createdAt).toLocaleDateString()}
                   </p>
+                  {(() => {
+                    const state = describePolicyState(key.policies);
+                    return (
+                      <p className="mt-1 flex items-center gap-1.5 text-xs text-text-muted">
+                        <span className="material-symbols-outlined text-[13px]">shield</span>
+                        Access: <span className="font-medium text-text-main">{state.label}</span>
+                      </p>
+                    );
+                  })()}
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
                   )}
@@ -1070,6 +1082,9 @@ export default function APIPageClient({ machineId }) {
                   />
                 </div>
                 <div className="flex items-center gap-2 shrink-0 pt-0.5">
+                  <Button size="sm" variant="outline" icon="shield" onClick={() => setAccessKey(key)}>
+                    Access
+                  </Button>
                   <Toggle
                     size="sm"
                     checked={key.isActive ?? true}
@@ -1325,6 +1340,18 @@ export default function APIPageClient({ machineId }) {
         title={confirmState?.title || "Confirm"}
         message={confirmState?.message}
         variant="danger"
+      />
+
+      {/* Per-key access policy editor */}
+      <KeyAccessDrawer
+        keyRow={accessKey}
+        isOpen={Boolean(accessKey)}
+        onClose={() => setAccessKey(null)}
+        onSaved={(updated) => {
+          if (!updated?.id) return;
+          setKeys((prev) => prev.map((entry) => (entry.id === updated.id ? { ...entry, ...updated } : entry)));
+          setAccessKey((current) => (current?.id === updated.id ? { ...current, ...updated } : current));
+        }}
       />
     </div>
   );

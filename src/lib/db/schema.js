@@ -84,9 +84,12 @@ export const TABLES = {
       isActive: "INTEGER DEFAULT 1",
       createdAt: "TEXT NOT NULL",
       // Per-key access control. Additive columns, picked up by
-      // syncSchemaFromTables() on boot; existing rows read as unrestricted (0).
+      // syncSchemaFromTables() on boot; existing rows read as unrestricted (0 / null).
+      // accessRestricted/accessAllow is upstream's flat shape; policies is the
+      // fork's JSON policy blob used by @/lib/keys/* enforcement. Both are kept.
       accessRestricted: "INTEGER DEFAULT 0",
       accessAllow: "TEXT",
+      policies: "TEXT",
     },
     indexes: ["CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key)"],
   },
@@ -131,6 +134,7 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_uh_provider ON usageHistory(provider)",
       "CREATE INDEX IF NOT EXISTS idx_uh_model ON usageHistory(model)",
       "CREATE INDEX IF NOT EXISTS idx_uh_conn ON usageHistory(connectionId)",
+      "CREATE INDEX IF NOT EXISTS idx_uh_apikey_ts ON usageHistory(apiKey, timestamp)",
     ],
   },
   usageDaily: {
