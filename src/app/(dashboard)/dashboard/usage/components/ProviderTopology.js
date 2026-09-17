@@ -44,7 +44,7 @@ function providerOfModel(model) {
 
 // Custom provider node - rectangle with image + name
 function ProviderNode({ data }) {
-  const { label, color, imageUrl, textIcon, active, clickable, subtitle, role } = data;
+  const { label, color, imageUrl, textIcon, active, activeCount, clickable, subtitle, role } = data;
   const [imgError, setImgError] = useState(false);
   const isSource = role === "source";
   return (
@@ -103,7 +103,16 @@ function ProviderNode({ data }) {
         {subtitle && <span className="block text-[11px] text-text-muted">{subtitle}</span>}
       </div>
 
-      {/* Active indicator */}
+      {/* Active indicator: live request count for this provider, then ping dot */}
+      {active && activeCount > 0 && (
+        <span
+          className="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums"
+          style={{ backgroundColor: `${color}20`, color }}
+          title={`${activeCount} in-flight request${activeCount > 1 ? "s" : ""}`}
+        >
+          {activeCount}
+        </span>
+      )}
       {active && (
         <span className="relative flex h-2 w-2 shrink-0">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: color }} />
@@ -118,7 +127,7 @@ ProviderNode.propTypes = { data: PropTypes.object.isRequired };
 
 // One account inside a provider pool lane
 function ConnectionNode({ data }) {
-  const { label, requests, tokens, failures, lastUsed, testStatus, cooldownUntil, active, clickable } = data;
+  const { label, requests, tokens, failures, lastUsed, testStatus, cooldownUntil, active, activeCount, clickable } = data;
   const cooling = cooldownUntil && new Date(cooldownUntil).getTime() > Date.now();
   const ok = !cooling && failures === 0 && testStatus !== "unavailable";
   return (
@@ -141,6 +150,14 @@ function ConnectionNode({ data }) {
           {lastUsed ? ` · ${fmtTime(lastUsed)}` : ""}
         </span>
       </div>
+      {active && activeCount > 0 && (
+        <span
+          className="shrink-0 rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-cyan-600 dark:text-cyan-400"
+          title={`${activeCount} in-flight request${activeCount > 1 ? "s" : ""}`}
+        >
+          {activeCount}
+        </span>
+      )}
       {cooling && (
         <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">cooling</span>
       )}
@@ -227,7 +244,10 @@ function RouterNode({ data }) {
         9Router
       </span>
       {data.activeCount > 0 && (
-        <span className="ml-2 px-1.5 py-0.5 rounded-full bg-yellow-400 text-black text-xs font-bold topology-router-badge">
+        <span
+          className="ml-2 px-1.5 py-0.5 rounded-full bg-yellow-400 text-black text-xs font-bold tabular-nums topology-router-badge"
+          title={`${data.activeCount} in-flight request${data.activeCount > 1 ? "s" : ""} across ${data.activeProviders || 1} provider${(data.activeProviders || 1) > 1 ? "s" : ""}`}
+        >
           {data.activeCount}
         </span>
       )}
@@ -374,7 +394,7 @@ const EDGE_STYLE = (active, last, error) => {
 };
 
 // Place N nodes evenly along an ellipse around the router center.
-function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable = false) {
+function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable = false, activeCounts = new Map(), totalActive = 0) {
   const nodeW = 180;
   const nodeH = 30;
   const routerW = 120;
@@ -398,7 +418,7 @@ function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable
     id: "router",
     type: "router",
     position: { x: -routerW / 2, y: -routerH / 2 },
-    data: { activeCount: activeSet.size },
+    data: { activeCount: totalActive, activeProviders: activeSet.size },
     draggable: false,
   });
 
@@ -408,12 +428,14 @@ function buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickable
     const last = !active && lastSet.has(p.provider?.toLowerCase());
     const error = !active && errorSet.has(p.provider?.toLowerCase());
     const nodeId = `provider-${p.provider}`;
+    const providerActiveCount = activeCounts.get((p.provider || "").toLowerCase()) || 0;
     const data = {
       label: (config.name !== p.provider ? config.name : null) || p.nodeName || p.name || p.provider,
       color: config.color || "#6b7280",
       imageUrl: getProviderImageUrl(p.provider),
       textIcon: config.textIcon || (p.provider || "?").slice(0, 2).toUpperCase(),
       active,
+      activeCount: providerActiveCount,
       clickable,
     };
 
@@ -467,6 +489,13 @@ function buildPoolsLayout(providers, activeRequests = []) {
   const activeAccounts = new Set(
     (activeRequests || []).map((r) => `${(r.provider || "").toLowerCase()}|${r.account || ""}`)
   );
+  // in-flight request count per account (same account can serve several sessions)
+  const activeCounts = new Map();
+  for (const request of activeRequests || []) {
+    const key = `${(request.provider || "").toLowerCase()}|${request.account || ""}`;
+    const count = Number(request.count) > 0 ? Number(request.count) : 1;
+    activeCounts.set(key, (activeCounts.get(key) || 0) + count);
+  }
 
   let y = 0;
   for (const provider of providers) {
@@ -496,7 +525,8 @@ function buildPoolsLayout(providers, activeRequests = []) {
     connections.forEach((conn, index) => {
       const connId = `conn-${provider.provider}-${conn.connectionId || index}`;
       const accountName = conn.name || conn.connectionId?.slice(0, 8) || "account";
-      const active = activeAccounts.has(`${(provider.provider || "").toLowerCase()}|${accountName}`);
+      const accountKey = `${(provider.provider || "").toLowerCase()}|${accountName}`;
+      const active = activeAccounts.has(accountKey);
       nodes.push({
         id: connId,
         type: "connection",
@@ -512,6 +542,7 @@ function buildPoolsLayout(providers, activeRequests = []) {
           testStatus: conn.testStatus,
           cooldownUntil: conn.cooldownUntil,
           active,
+          activeCount: activeCounts.get(accountKey) || 0,
           clickable: true,
         },
         draggable: false,
@@ -706,6 +737,21 @@ export default function ProviderTopology({
     return filtered;
   }, [rawActiveSet, tick]);
 
+  // In-flight requests per provider and overall. One entry per (account, model)
+  // can carry a count > 1 when the same provider serves several concurrent
+  // sessions, so count requests rather than distinct providers.
+  const activeTotals = useMemo(() => {
+    const byProvider = new Map();
+    let total = 0;
+    for (const request of activeRequests || []) {
+      const provider = (request.provider || "").toLowerCase();
+      const count = Number(request.count) > 0 ? Number(request.count) : 1;
+      total += count;
+      if (provider) byProvider.set(provider, (byProvider.get(provider) || 0) + count);
+    }
+    return { byProvider, total };
+  }, [activeRequests]);
+
   // Routing data powers pools + combos modes.
   useEffect(() => {
     if (mode === "providers") return;
@@ -729,8 +775,16 @@ export default function ProviderTopology({
     if (mode === "combos") {
       return buildCombosLayout(routing?.combos || []);
     }
-    return buildProvidersLayout(providers, activeSet, lastSet, errorSet, clickableProviders);
-  }, [mode, providers, routing, activeSet, lastSet, errorSet, clickableProviders, activeRequests]);
+    return buildProvidersLayout(
+      providers,
+      activeSet,
+      lastSet,
+      errorSet,
+      clickableProviders,
+      activeTotals.byProvider,
+      activeTotals.total
+    );
+  }, [mode, providers, routing, activeSet, lastSet, errorSet, clickableProviders, activeRequests, activeTotals]);
 
   const graphKey = useMemo(
     () => `${mode}:${graph.nodes.length}:${providers.map((p) => p.provider).sort().join(",")}`,
@@ -880,6 +934,7 @@ ProviderTopology.propTypes = {
     provider: PropTypes.string,
     model: PropTypes.string,
     account: PropTypes.string,
+    count: PropTypes.number,
   })),
   lastProvider: PropTypes.string,
   errorProvider: PropTypes.string,

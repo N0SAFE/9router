@@ -29,6 +29,18 @@ export async function register() {
       // best effort
     }
 
+    // Remote agent host: same reasoning (detached supervisor dies with the
+    // service cgroup on restart).
+    try {
+      const { ensureAgentHostFromState } = await import("@/lib/remote/agentHost");
+      const result = await ensureAgentHostFromState();
+      if (result.restarted) {
+        console.log("[Remote] agent host restarted:", result.name);
+      }
+    } catch {
+      // best effort
+    }
+
     const { startModelCatalogSync } = await import("@/lib/modelCatalog/sync.js");
     startModelCatalogSync();
 
