@@ -17,6 +17,18 @@ export async function register() {
       // best effort
     }
 
+    // Remote workspace tunnel: restart it after a service restart when it was
+    // started from the dashboard (systemd kills the service cgroup processes).
+    try {
+      const { ensureTunnelFromState } = await import("@/lib/remote/tunnel");
+      const result = await ensureTunnelFromState();
+      if (result.restarted) {
+        console.log("[Remote] workspace tunnel restarted:", result.name);
+      }
+    } catch {
+      // best effort
+    }
+
     const { startModelCatalogSync } = await import("@/lib/modelCatalog/sync.js");
     startModelCatalogSync();
 
