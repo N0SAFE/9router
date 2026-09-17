@@ -3,6 +3,7 @@ import { getRequestDetailsInRange, getUsageHistory } from "@/lib/usageDb";
 import { getSettings, getProviderConnections } from "@/lib/localDb";
 import { getPricingForModel, calculateCostFromTokens } from "open-sse/providers/pricing.js";
 import { mergeUsageRows } from "@/lib/usage/mergeDetails";
+import { loadFilteredUsageRequests } from "@/lib/usage/loadFilteredRequests";
 import { buildContentDigest } from "@/lib/usage/contentDigest";
 
 const MAX_ROWS = 2000;
@@ -21,7 +22,8 @@ const REDACTED_KEYS = ["request", "providerRequest", "providerResponse", "respon
 
 /**
  * GET /api/usage/request-details
- * Query parameters: page, pageSize (1-100), provider, model, connectionId, status, startDate, endDate
+ * Query parameters: page, pageSize (1-100), provider, model, connectionId,
+ *   status, apiKeyId, endpoint, q, startDate, endDate
  *
  * Merges rich request details with the long-lived usage history so rows are not
  * lost when observability was off, and attaches a bounded content digest
@@ -45,6 +47,9 @@ export async function GET(request) {
     const model = searchParams.get("model");
     const connectionId = searchParams.get("connectionId");
     const status = searchParams.get("status");
+    const apiKeyId = searchParams.get("apiKeyId");
+    const endpoint = searchParams.get("endpoint");
+    const q = searchParams.get("q");
     const startDate = searchParams.get("startDate");
     const endDate = searchParams.get("endDate");
     if (provider) filter.provider = provider;
@@ -54,11 +59,30 @@ export async function GET(request) {
     if (startDate) filter.startDate = startDate;
     if (endDate) filter.endDate = endDate;
 
-    const [details, history, settings, connections] = await Promise.all([
-      getRequestDetailsInRange(filter, MAX_ROWS),
-      getUsageHistory(filter),
+    const usesJsFilters = Boolean(apiKeyId || endpoint || q);
+
+    const [settings, connections, loaded] = await Promise.all([
       getSettings(),
       getProviderConnections().catch(() => []),
+      usesJsFilters
+        ? loadFilteredUsageRequests({
+            period: "all",
+            startDate,
+            endDate,
+            filters: { ...filter, apiKeyId, endpoint, q },
+            limit: MAX_ROWS,
+          })
+        : (async () => {
+            const [details, history] = await Promise.all([
+              getRequestDetailsInRange(filter, MAX_ROWS),
+              getUsageHistory(filter),
+            ]);
+            return {
+              rows: mergeUsageRows(details, history).slice(0, MAX_ROWS),
+              details: details.length,
+              history: history.length,
+            };
+          })(),
     ]);
 
     // id -> account display name (one query, applied to every row).
@@ -69,7 +93,7 @@ export async function GET(request) {
       ])
     );
 
-    const merged = mergeUsageRows(details, history).slice(0, MAX_ROWS);
+    const merged = loaded.rows;
     const contentMode = settings.observabilityContentMode === "none" ? "none" : "digest";
 
     const enriched = merged.map((row) => {
@@ -99,7 +123,7 @@ export async function GET(request) {
         hasNext: page < totalPages,
         hasPrev: page > 1,
       },
-      sources: { details: details.length, history: history.length },
+      sources: { details: loaded.details, history: loaded.history },
       contentMode,
     });
   } catch (error) {

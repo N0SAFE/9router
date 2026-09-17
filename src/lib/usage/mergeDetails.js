@@ -12,10 +12,13 @@ function roundWindow(ms) {
   return Math.round(ms / OVERLAP_WINDOW_MS) * OVERLAP_WINDOW_MS;
 }
 
-function overlapKey(row) {
+export function overlapKey(row) {
   const time = row?.timestamp ? new Date(row.timestamp).getTime() : 0;
   return `${row?.provider || ""}|${row?.model || ""}|${row?.connectionId || ""}|${roundWindow(time)}`;
 }
+
+/** Public alias: filter detail rows whose history match was filtered out. */
+export const usageOverlapKey = overlapKey;
 
 /** Map a usageHistory row into the request-detail shape. */
 export function mapHistoryRow(row) {

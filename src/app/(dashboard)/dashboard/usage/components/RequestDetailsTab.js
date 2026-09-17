@@ -20,6 +20,8 @@ import {
 } from "@/lib/usage/insights";
 import TokenFlowBar from "./TokenFlowBar";
 import UsageInsights from "./UsageInsights";
+import UsageFilterBar from "./UsageFilterBar";
+import { useUsageFilters } from "./useUsageFilters";
 import { fmt, fmtCompact, fmtCost, fmtPct, fmtTime, fmtDateTime, fmtDuration } from "./format";
 
 const PERIODS = [
@@ -323,19 +325,16 @@ function CollapsibleSection({ title, children, defaultOpen = false, icon = null 
 
 export default function RequestDetailsTab() {
   const searchParams = useSearchParams();
+  const { filters, queryString, patchFilters, clearFilters, activeCount } = useUsageFilters();
   const [period, setPeriod] = useState(() => {
     const urlPeriod = searchParams.get("period");
     return PERIODS.some((p) => p.value === urlPeriod) ? urlPeriod : "7d";
   });
-  const [providerFilter, setProviderFilter] = useState(() => searchParams.get("provider") || "");
-  const [modelFilter, setModelFilter] = useState(() => searchParams.get("model") || "");
-  const [connectionFilter, setConnectionFilter] = useState(() => searchParams.get("connectionId") || "");
   const [details, setDetails] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 20, totalItems: 0, totalPages: 0 });
   const [detailsLoading, setDetailsLoading] = useState(true);
   const [insights, setInsights] = useState(null);
   const [insightsLoading, setInsightsLoading] = useState(true);
-  const [providers, setProviders] = useState([]);
   const [providerNameCache, setProviderNameCache] = useState(null);
   const [selectedDetail, setSelectedDetail] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -351,10 +350,6 @@ export default function RequestDetailsTab() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/usage/providers")
-      .then((res) => res.json())
-      .then((data) => { if (!cancelled) setProviders(data.providers || []); })
-      .catch((error) => console.error("Failed to fetch providers:", error));
     fetchProviderNames()
       .then((cache) => { if (!cancelled) setProviderNameCache(cache); })
       .catch((error) => console.error("Failed to fetch provider names:", error));
@@ -364,16 +359,16 @@ export default function RequestDetailsTab() {
   useEffect(() => {
     let cancelled = false;
     const params = new URLSearchParams({ period });
-    if (providerFilter) params.append("provider", providerFilter);
-    if (modelFilter) params.append("model", modelFilter);
-    if (connectionFilter) params.append("connectionId", connectionFilter);
-    fetch(`/api/usage/insights?${params}`)
+    for (const [key, value] of Object.entries(filters)) {
+      if (value) params.append(key, value);
+    }
+    fetch(`/api/usage/insights?${params}`, { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => { if (!cancelled && data && !data.error) setInsights(data); })
       .catch((error) => console.error("Failed to fetch usage insights:", error))
       .finally(() => { if (!cancelled) setInsightsLoading(false); });
     return () => { cancelled = true; };
-  }, [period, providerFilter, modelFilter, connectionFilter, refreshKey]);
+  }, [period, filters, refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -381,11 +376,11 @@ export default function RequestDetailsTab() {
       page: String(pagination.page),
       pageSize: String(pagination.pageSize),
     });
-    if (providerFilter) params.append("provider", providerFilter);
-    if (modelFilter) params.append("model", modelFilter);
-    if (connectionFilter) params.append("connectionId", connectionFilter);
+    for (const [key, value] of Object.entries(filters)) {
+      if (value) params.append(key, value);
+    }
     if (startDate) params.append("startDate", startDate);
-    fetch(`/api/usage/request-details?${params}`)
+    fetch(`/api/usage/request-details?${params}`, { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => {
         if (cancelled) return;
@@ -395,7 +390,7 @@ export default function RequestDetailsTab() {
       .catch((error) => console.error("Failed to fetch request details:", error))
       .finally(() => { if (!cancelled) setDetailsLoading(false); });
     return () => { cancelled = true; };
-  }, [pagination.page, pagination.pageSize, providerFilter, modelFilter, connectionFilter, startDate, refreshKey]);
+  }, [pagination.page, pagination.pageSize, filters, startDate, refreshKey]);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -412,24 +407,22 @@ export default function RequestDetailsTab() {
     setPagination((prev) => ({ ...prev, page: 1 }));
   };
 
-  const handleProviderChange = (value) => {
-    setProviderFilter(value);
+  const handleFilterPatch = useCallback(
+    (patch) => {
+      setInsightsLoading(true);
+      setDetailsLoading(true);
+      setPagination((prev) => ({ ...prev, page: 1 }));
+      patchFilters(patch);
+    },
+    [patchFilters]
+  );
+
+  const handleFilterClear = useCallback(() => {
     setInsightsLoading(true);
     setDetailsLoading(true);
     setPagination((prev) => ({ ...prev, page: 1 }));
-  };
-
-  const handleModelChange = (value) => {
-    setModelFilter(value || "");
-    setDetailsLoading(true);
-    setPagination((prev) => ({ ...prev, page: 1 }));
-  };
-
-  const handleConnectionChange = (value) => {
-    setConnectionFilter(value || "");
-    setDetailsLoading(true);
-    setPagination((prev) => ({ ...prev, page: 1 }));
-  };
+    clearFilters();
+  }, [clearFilters]);
 
   const handlePageChange = (newPage) => {
     setDetailsLoading(true);
@@ -452,29 +445,16 @@ export default function RequestDetailsTab() {
   );
 
   return (
-    <div className="flex min-w-0 flex-col gap-6">
+    <div className="flex min-w-0 flex-col gap-4">
       {/* Filters */}
-      <Card padding="sm">
-        <div className="flex flex-wrap items-center gap-3">
+      <Card padding="sm" className="sticky top-0 z-20 backdrop-blur supports-[backdrop-filter]:bg-surface/85">
+        <div className="flex flex-wrap items-center gap-2">
           <SegmentedControl options={PERIODS} value={period} onChange={handlePeriodChange} size="sm" />
-          <select
-            id="provider-filter"
-            value={providerFilter}
-            onChange={(e) => handleProviderChange(e.target.value)}
-            className={cn(
-              "h-9 min-w-0 cursor-pointer rounded-lg border border-border bg-surface px-3 text-sm text-text-main",
-              "focus:outline-none focus:ring-2 focus:ring-primary/20"
-            )}
-            style={{ colorScheme: "auto" }}
-          >
-            <option value="">All providers</option>
-            {providers.map((provider) => (
-              <option key={provider.id} value={provider.id}>{provider.name}</option>
-            ))}
-          </select>
+          <UsageFilterBar period={period} filters={filters} onPatch={handleFilterPatch} onClear={handleFilterClear} />
           <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs text-text-muted">
-              {insights?.sampled ? `${fmt(insights.sampled)} sampled requests` : ""}
+            <span className="text-[11px] text-text-muted">
+              {insights?.sampled ? `${fmt(insights.sampled)} sampled` : ""}
+              {activeCount > 0 ? ` · ${activeCount} filter${activeCount > 1 ? "s" : ""}` : ""}
             </span>
             <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing}>
               <span className={cn("material-symbols-outlined text-[16px]", refreshing && "animate-spin")}>refresh</span>
@@ -482,32 +462,6 @@ export default function RequestDetailsTab() {
             </Button>
           </div>
         </div>
-        {(modelFilter || connectionFilter) && (
-          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border-subtle pt-3">
-            <span className="text-xs text-text-muted">Filtered by</span>
-            {modelFilter && (
-              <button
-                type="button"
-                onClick={() => handleModelChange("")}
-                className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2.5 py-1 text-xs text-text-main hover:bg-surface-3"
-              >
-                <span className="font-mono">{modelFilter}</span>
-                <span className="material-symbols-outlined text-[14px]">close</span>
-              </button>
-            )}
-            {connectionFilter && (
-              <button
-                type="button"
-                onClick={() => handleConnectionChange("")}
-                className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2.5 py-1 text-xs text-text-main hover:bg-surface-3"
-              >
-                <span className="material-symbols-outlined text-[14px]">account_circle</span>
-                <span className="font-mono">{connectionFilter.slice(0, 8)}</span>
-                <span className="material-symbols-outlined text-[14px]">close</span>
-              </button>
-            )}
-          </div>
-        )}
       </Card>
 
       {/* Insights */}
@@ -516,6 +470,8 @@ export default function RequestDetailsTab() {
         loading={insightsLoading}
         providerName={providerName}
         onSelectOffender={openDetail}
+        period={period}
+        filters={filters}
       />
 
       {/* Requests table */}
@@ -584,7 +540,7 @@ export default function RequestDetailsTab() {
                         {detail.connectionId ? (
                           <button
                             type="button"
-                            onClick={(event) => { event.stopPropagation(); handleConnectionChange(detail.connectionId); }}
+                            onClick={(event) => { event.stopPropagation(); handleFilterPatch({ connectionId: detail.connectionId }); }}
                             className="flex max-w-full items-center gap-1.5 truncate rounded-full bg-surface-2 px-2 py-0.5 text-xs text-text-main hover:bg-surface-3"
                             title={detail.connectionName || detail.connectionId}
                           >

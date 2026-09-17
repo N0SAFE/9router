@@ -278,6 +278,8 @@ export function analyzeRequestDetails(rows = [], { costEstimator } = {}) {
         wastedTokens: 0,
         wastedUsd: 0,
         examples: [],
+        sampleIds: [],
+        dimensions: { providers: new Map(), models: new Map(), accounts: new Map() },
       };
       entry.occurrences += 1;
       entry.wastedTokens += num(flag.wastedTokens);
@@ -290,6 +292,16 @@ export function analyzeRequestDetails(rows = [], { costEstimator } = {}) {
           model: row.model || null,
         });
       }
+      if (entry.sampleIds.length < 5 && row.id) {
+        entry.sampleIds.push(row.id);
+      }
+      const bumpDim = (map, label) => {
+        const key = label || "unknown";
+        map.set(key, (map.get(key) || 0) + 1);
+      };
+      bumpDim(entry.dimensions.providers, row.provider);
+      bumpDim(entry.dimensions.models, row.model);
+      bumpDim(entry.dimensions.accounts, row.connectionName || row.account || row.connectionId);
       patternMap.set(flag.id, entry);
     }
 
@@ -320,11 +332,26 @@ export function analyzeRequestDetails(rows = [], { costEstimator } = {}) {
   overview.cacheHitRate = overview.inputTokens > 0 ? overview.cachedTokens / overview.inputTokens : 0;
   overview.potentialSavingsUsd = Number(overview.potentialSavingsUsd.toFixed(6));
 
-  const patterns = [...patternMap.values()].sort((a, b) => {
-    const bySeverity = (SEVERITY_ORDER[b.severity] || 0) - (SEVERITY_ORDER[a.severity] || 0);
-    if (bySeverity !== 0) return bySeverity;
-    return b.wastedTokens - a.wastedTokens;
-  });
+  const topDim = (map) =>
+    [...map.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+  const patterns = [...patternMap.values()]
+    .map((entry) => ({
+      ...entry,
+      dimensions: {
+        providers: topDim(entry.dimensions.providers),
+        models: topDim(entry.dimensions.models),
+        accounts: topDim(entry.dimensions.accounts),
+      },
+    }))
+    .sort((a, b) => {
+      const bySeverity = (SEVERITY_ORDER[b.severity] || 0) - (SEVERITY_ORDER[a.severity] || 0);
+      if (bySeverity !== 0) return bySeverity;
+      return b.wastedTokens - a.wastedTokens;
+    });
 
   offenders.sort((a, b) => b.wastedTokens - a.wastedTokens);
 
