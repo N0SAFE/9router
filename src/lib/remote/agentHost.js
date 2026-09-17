@@ -3,6 +3,8 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { firstApiKey } from "./apiAuth.js";
+import { routerBaseV1, routerRoot } from "./harnessConfig.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,8 +62,24 @@ function readState() {
   }
 }
 
-export function getAgentHostState() {
-  return readState();
+/**
+ * Live agent host state. The CLI wrapper detaches into a supervisor, so pid
+ * liveness alone is not enough: a registered standalone endpoint means the
+ * host is up even after the spawned process exits.
+ */
+export async function getAgentHostState() {
+  const raw = readState();
+  const endpoints = await listAgentEndpoints();
+  const standalone = endpoints.find((endpoint) => endpoint?.type === "standalone");
+  const wrapperAlive = isAlive(raw.pid);
+  const supervisorPid = standalone?.pid || null;
+  return {
+    ...raw,
+    running: wrapperAlive || Boolean(standalone),
+    pid: wrapperAlive ? raw.pid : supervisorPid || raw.pid,
+    wrapperPid: raw.pid,
+    supervisorPid,
+  };
 }
 
 /**
@@ -69,6 +87,26 @@ export function getAgentHostState() {
  * Microsoft) happens interactively in the CLI on first use; its output is
  * streamed to ~/.9router/remote/agent-host.log for the dashboard to show.
  */
+function spawnAgentHost(cli, args, env) {
+  const outFd = fs.openSync(LOG_FILE, "a");
+  const child = spawn(cli, args, {
+    detached: true,
+    stdio: ["ignore", outFd, outFd],
+    env,
+  });
+  child.unref();
+  fs.closeSync(outFd);
+  return child;
+}
+
+function tailLog(lines = 40) {
+  try {
+    return fs.readFileSync(LOG_FILE, "utf8").split("\n").slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
 export async function startAgentHost({ name } = {}) {
   const current = readState();
   if (current.running) {
@@ -82,19 +120,40 @@ export async function startAgentHost({ name } = {}) {
   }
 
   ensureDir();
-  const machineName = String(name || os.hostname())
+  const machineName = String(name || "9router-agent")
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
-    .slice(0, 40) || "9router-host";
+    .slice(0, 40) || "9router-agent";
+
+  // Harnesses spawned by the agent host inherit this environment, so Claude
+  // Code / Codex / opencode resolve models through 9Router. Persisted configs
+  // (Remote page → "Wire harnesses") cover the case where the host is started
+  // from a plain shell instead.
+  const env = {
+    ...process.env,
+    ANTHROPIC_BASE_URL: routerRoot(),
+    OPENAI_BASE_URL: routerBaseV1(),
+  };
+  try {
+    const apiKey = await firstApiKey();
+    if (apiKey) {
+      env.ANTHROPIC_AUTH_TOKEN = apiKey;
+      env.ANTHROPIC_API_KEY = apiKey;
+      env.OPENAI_API_KEY = apiKey;
+    }
+  } catch {
+    // no key available; harness configs / public endpoint still apply
+  }
 
   const args = ["agent", "host", "--tunnel", "--name", machineName];
-  const outFd = fs.openSync(LOG_FILE, "a");
-  const child = spawn(cli, args, {
-    detached: true,
-    stdio: ["ignore", outFd, outFd],
-  });
-  child.unref();
-  fs.closeSync(outFd);
+  let child = spawnAgentHost(cli, args, env);
+  // The CLI exits when another agent host is registered without a tunnel
+  // (e.g. an editor's local host): take it over and retry once.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  if (!isAlive(child.pid) && /already running|conflicts with the running supervisor/i.test(tailLog())) {
+    child = spawnAgentHost(cli, [...args, "--replace"], env);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
 
   if (!child.pid) {
     const error = new Error(`${cli} agent host could not be started`);
@@ -102,8 +161,6 @@ export async function startAgentHost({ name } = {}) {
     throw error;
   }
 
-  // The supervisor may detach into its own process; the CLI pid still lets us
-  // detect "we started something" while logs and endpoints tell the truth.
   const state = {
     pid: child.pid,
     cli,
@@ -111,19 +168,32 @@ export async function startAgentHost({ name } = {}) {
     startedAt: new Date().toISOString(),
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  return { ...state, running: true };
+  return { ...state, running: isAlive(child.pid) };
 }
 
-export function stopAgentHost() {
-  const state = readState();
-  if (!state.running || !state.pid) {
+export async function stopAgentHost() {
+  const state = await getAgentHostState();
+  if (!state.running) {
+    try {
+      fs.unlinkSync(STATE_FILE);
+    } catch {
+      // ignore
+    }
     return { ...state, running: false };
   }
-  try {
-    process.kill(-state.pid, "SIGTERM");
-  } catch {
+  const cli = state.cli || (await findCli());
+  if (cli) {
     try {
-      process.kill(state.pid, "SIGTERM");
+      // Stops standalone supervisors only; an editor's own agent host is kept.
+      await execFileAsync(cli, ["agent", "kill"], { timeout: 10000 });
+    } catch {
+      // fall through to signals
+    }
+  }
+  const targetPid = state.supervisorPid || state.pid;
+  if (isAlive(targetPid)) {
+    try {
+      process.kill(targetPid, "SIGTERM");
     } catch {
       // already gone
     }

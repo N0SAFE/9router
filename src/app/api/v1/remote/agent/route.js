@@ -50,7 +50,7 @@ export async function GET(request) {
   if (!(await authorize(request))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const state = getAgentHostState();
+  const state = await getAgentHostState();
   const [endpoints, sessions] = await Promise.all([listAgentEndpoints(), listAgentSessions()]);
   return NextResponse.json({
     state,
@@ -92,5 +92,5 @@ export async function DELETE(request) {
   if (!(await authorize(request))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  return NextResponse.json({ state: stopAgentHost() });
+  return NextResponse.json({ state: await stopAgentHost() });
 }

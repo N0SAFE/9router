@@ -28,7 +28,7 @@ function publicEndpoints(endpoints) {
  */
 export async function GET() {
   try {
-    const state = getAgentHostState();
+    const state = await getAgentHostState();
     const [endpoints, sessions] = await Promise.all([listAgentEndpoints(), listAgentSessions()]);
     return NextResponse.json({
       state,
@@ -72,7 +72,7 @@ export async function POST(request) {
 /** DELETE /api/remote/agent — stop the managed agent host. */
 export async function DELETE() {
   try {
-    return NextResponse.json({ state: stopAgentHost() });
+    return NextResponse.json({ state: await stopAgentHost() });
   } catch (error) {
     return NextResponse.json({ error: error?.message || "Failed to stop agent host" }, { status: 400 });
   }

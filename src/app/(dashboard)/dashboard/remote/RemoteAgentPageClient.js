@@ -21,6 +21,10 @@ export default function RemoteAgentPageClient() {
   const [repo, setRepo] = useState("");
   const [branch, setBranch] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
+  const [harnessInfo, setHarnessInfo] = useState(null);
+  const [harnessModel, setHarnessModel] = useState("");
+  const [harnessBusy, setHarnessBusy] = useState(false);
+  const [harnessMessage, setHarnessMessage] = useState("");
   const { copy } = useCopyToClipboard();
 
   const refresh = useCallback(async () => {
@@ -39,6 +43,17 @@ export default function RemoteAgentPageClient() {
       setError(payload.error || tunnelPayload.error || "");
     } catch (err) {
       setError(String(err?.message || err));
+    }
+  }, []);
+
+  const refreshHarness = useCallback(async () => {
+    try {
+      const response = await fetch("/api/remote/harness-config", { cache: "no-store" });
+      const payload = await response.json();
+      setHarnessInfo(payload);
+      setHarnessModel((current) => current || payload?.suggestedModels?.[0] || "");
+    } catch {
+      // the card simply stays empty
     }
   }, []);
 
@@ -79,9 +94,10 @@ export default function RemoteAgentPageClient() {
     // Initial load; refresh() awaits its fetch before updating state.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
+    void refreshHarness();
     const timer = setInterval(refresh, 10000);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, refreshHarness]);
 
   const refreshLogs = useCallback(async () => {
     try {
@@ -136,6 +152,38 @@ export default function RemoteAgentPageClient() {
     }
   }, [refresh]);
 
+  const wireHarnesses = useCallback(async () => {
+    const model = harnessModel.trim();
+    if (!model) {
+      return;
+    }
+    setHarnessBusy(true);
+    setHarnessMessage("");
+    try {
+      const response = await fetch("/api/remote/harness-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to wire harnesses");
+      }
+      const results = payload.results || [];
+      const failed = results.filter((item) => !item.ok);
+      setHarnessMessage(
+        failed.length
+          ? `Wired ${results.length - failed.length}/${results.length} — failed: ${failed.map((item) => item.label).join(", ")}`
+          : `Wired ${results.length} harness(es) to ${payload.baseUrl}`
+      );
+      await refreshHarness();
+    } catch (err) {
+      setHarnessMessage(String(err?.message || err));
+    } finally {
+      setHarnessBusy(false);
+    }
+  }, [harnessModel, refreshHarness]);
+
   const prepare = useCallback(async () => {
     setBusy(true);
     setError("");
@@ -169,6 +217,10 @@ export default function RemoteAgentPageClient() {
   const running = Boolean(state.running);
   const tunnelName = state.name || "(not started)";
   const connectHint = `Agents window → New session → Remote → Tunnels → ${tunnelName}`;
+  const harnessList = harnessInfo?.harnesses || [];
+  const harnessTotal = harnessList.length;
+  const wiredCount = harnessList.filter((item) => item.configured).length;
+  const allWired = harnessTotal > 0 && wiredCount === harnessTotal;
 
   return (
     <div className="flex flex-col gap-6">
@@ -306,6 +358,10 @@ export default function RemoteAgentPageClient() {
           <p className="font-medium">Connect from VS Code</p>
           <p className="mt-1 text-text-muted">{connectHint}</p>
           <p className="mt-1 text-text-muted">
+            Handoff: <em>Continue In</em> from a local chat lands on this host — the harness runs
+            here with this machine&apos;s tools/MCP and the models wired below.
+          </p>
+          <p className="mt-1 text-text-muted">
             Browser: <code className="text-text-main">https://insiders.vscode.dev/agents</code>
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -393,21 +449,60 @@ export default function RemoteAgentPageClient() {
       </Card>
 
       <Card>
-        <h2 className="text-lg font-semibold">Models for remote harnesses</h2>
-        <p className="text-sm text-text-muted">
-          The agent harness runs next to the workspace and reads its own model configuration.
-          Point Claude Code / Codex / opencode at this 9Router instance from the CLI Tools page so
-          remote sessions consume 9Router providers, combos and pools.
-        </p>
-        <div className="mt-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold">Harnesses here → 9Router models</h2>
+            <p className="text-sm text-text-muted">
+              Agent handoff (<em>Continue In</em> / Agents window → this host) runs Claude Code,
+              Codex or opencode on this machine. Wire their configs to this 9Router instance so
+              those sessions consume 9Router providers, combos and pools. Backup files are kept
+              next to each config.
+            </p>
+          </div>
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${statusClass(allWired)}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${allWired ? "bg-green-500" : "bg-text-muted"}`} />
+            {wiredCount}/{harnessTotal} wired
+          </span>
+        </div>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <Input
+              label="Model for harnesses"
+              placeholder="combo name or provider/model"
+              list="remote-harness-models"
+              value={harnessModel}
+              onChange={(event) => setHarnessModel(event.target.value)}
+            />
+            <datalist id="remote-harness-models">
+              {(harnessInfo?.suggestedModels || []).map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
+          </div>
+          <Button icon="cable" loading={harnessBusy} disabled={!harnessModel.trim()} onClick={wireHarnesses}>
+            Wire harnesses
+          </Button>
           <Link
             href="/dashboard/cli-tools"
             className="inline-flex h-9 items-center gap-2 rounded-[10px] border border-border px-4 text-sm font-semibold text-text-main transition-colors hover:bg-surface-2"
           >
             <span className="material-symbols-outlined text-[18px]">terminal</span>
-            Open CLI Tools
+            CLI Tools
           </Link>
         </div>
+        <div className="mt-3 flex flex-col gap-1 text-xs">
+          {(harnessInfo?.harnesses || []).map((item) => (
+            <span
+              key={item.id}
+              className={item.configured ? "text-green-600 dark:text-green-400" : "text-text-muted"}
+            >
+              {item.configured ? "●" : "○"} {item.label} — {item.configured
+                ? `${item.model || "model"} → ${item.baseUrl}`
+                : "not wired to 9Router"}
+            </span>
+          ))}
+        </div>
+        {harnessMessage ? <p className="mt-2 text-xs text-text-muted">{harnessMessage}</p> : null}
       </Card>
 
       {data?.sessions?.length ? (
