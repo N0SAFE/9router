@@ -40,8 +40,7 @@ function clampNumber(body, key, ceiling) {
 
 // Remove unsupported params from body in place; returns body.
 export function stripUnsupportedParams(provider, model, body) {
-  if (!model || !body || typeof body !== "object") return body;
-  for (const rule of STRIP_RULES) {
+  if (!model || !body || typeof body !== "object") return body;  for (const rule of STRIP_RULES) {
     if (rule.provider && rule.provider !== provider) continue;
     if (!matches(rule, model)) continue;
     for (const key of rule.drop || []) {
@@ -75,4 +74,29 @@ export function stripUnsupportedParams(provider, model, body) {
     }
   }
   return body;
+}
+
+/**
+ * Read-only view of the same rules: which request parameters a provider/model
+ * rejects or clamps. Used by the model listings to publish each model's
+ * settings so clients never send a parameter the model cannot take.
+ *
+ * @returns {{ dropped: string[], flattenContent: boolean, maxOutputCap: number|null }}
+ */
+export function getParamSupport(provider, model) {
+  const dropped = new Set();
+  let flattenContent = false;
+  let maxOutputCap = null;
+
+  for (const rule of STRIP_RULES) {
+    if (rule.provider && rule.provider !== provider) continue;
+    if (!matches(rule, model || "")) continue;
+    for (const key of rule.drop || []) dropped.add(key);
+    if (rule.flattenContent) flattenContent = true;
+    if (Number.isFinite(rule.maxOutputCap) && rule.maxOutputCap > 0) {
+      maxOutputCap = maxOutputCap === null ? rule.maxOutputCap : Math.min(maxOutputCap, rule.maxOutputCap);
+    }
+  }
+
+  return { dropped: [...dropped], flattenContent, maxOutputCap };
 }
