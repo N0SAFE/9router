@@ -574,6 +574,18 @@ export async function buildModelsList(kindFilter, options = {}) {
             liveFreeById = new Map(
               live.filter((m) => m?.id).map((m) => [m.id, m.free === true])
             );
+            // Capability metadata returned by the provider's own listing wins
+            // over local tables: the model list is the source of truth.
+            const liveCaps = live.filter((m) => m?.id && m.capabilities);
+            if (liveCaps.length > 0) {
+              liveCapabilitiesById = new Map(liveCapabilitiesById);
+              for (const model of liveCaps) {
+                liveCapabilitiesById.set(model.id, {
+                  ...(liveCapabilitiesById.get(model.id) || {}),
+                  ...model.capabilities,
+                });
+              }
+            }
           }
         } catch (err) {
           console.log(`Live model fetch failed for ${providerId}: ${err?.message || err}`);
@@ -660,9 +672,14 @@ export async function buildModelsList(kindFilter, options = {}) {
         // { id, name } — no per-model capability data. Fall back to the same
         // pattern-matched capabilities the dashboard uses (useModelCaps.js) so
         // dynamically-discovered LLM models still surface vision/reasoning/search/tools.
-        const liveCaps = liveCapabilitiesById.get(modelId);
-        const serviceCaps = capabilitiesFromServiceKind(customKind || liveKind);
-        const caps = liveCaps || serviceCaps || (kind === LLM_KIND ? getCapabilitiesForModel(providerId, modelId) : null);
+        // A provider that declares capabilities in its own listing (or the
+        // registry model catalog) wins over the local tables.
+        const computedCaps = capabilitiesFromServiceKind(customKind || liveKind)
+          || (kind === LLM_KIND ? getCapabilitiesForModel(providerId, modelId) : null);
+        const liveModelCaps = liveCapabilitiesById.get(modelId);
+        const caps = computedCaps
+          ? { ...computedCaps, ...(liveModelCaps || {}) }
+          : liveModelCaps || null;
         if (caps) model.capabilities = caps;
         // Token limits under the snake_case names the OpenAI/OpenRouter
         // convention uses. `capabilities.contextWindow` is camelCase and nested,

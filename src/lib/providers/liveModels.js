@@ -109,6 +109,9 @@ export function parseFetcherPayload(type, json) {
         name: model?.name || model?.id,
         free: model?.pricing?.prompt === "0" && model?.pricing?.completion === "0",
         contextLength: model?.context_length,
+        // OpenRouter declares modalities/parameters in its catalog: use them
+        // directly instead of guessing from the model name.
+        ...upstreamCapabilities(model),
       }))
       .filter((model) => typeof model.id === "string" && model.id.trim() !== "");
   }
@@ -116,11 +119,68 @@ export function parseFetcherPayload(type, json) {
   if (type === "openai") {
     const raw = Array.isArray(json?.data) ? json.data : [];
     return raw
-      .map((model) => ({ id: model?.id, name: model?.name || model?.id }))
+      .map((model) => ({
+        id: model?.id,
+        name: model?.name || model?.id,
+        ...upstreamCapabilities(model),
+      }))
       .filter((model) => typeof model.id === "string" && model.id.trim() !== "");
   }
 
   return [];
+}
+
+/**
+ * Read capability hints out of an upstream model entry when the provider
+ * declares them. Different vendors spell the same thing differently, so accept
+ * the common shapes and only keep what is positively declared. This is what
+ * lets a provider's own /models listing drive capabilities end-to-end.
+ */
+function upstreamCapabilities(model) {
+  if (!model || typeof model !== "object") return {};
+  const caps = {};
+  const declared = model.capabilities;
+  if (declared && typeof declared === "object" && !Array.isArray(declared)) {
+    Object.assign(caps, declared);
+  }
+  // Common boolean spellings
+  if (model.vision === true || model.supports_vision === true || model.attachment === true) caps.vision = true;
+  if (model.tool_call === true || model.tools === true || model.function_calling === true) caps.tools = true;
+  if (model.reasoning === true || model.thinking === true) caps.reasoning = true;
+  if (model.pdf === true || model.supports_pdf === true) caps.pdf = true;
+  // OpenAI/OpenRouter style modality arrays
+  const inputModalities = model.modalities?.input || model.architecture?.input_modalities;
+  if (Array.isArray(inputModalities)) {
+    if (inputModalities.includes("image")) caps.vision = true;
+    if (inputModalities.includes("pdf")) caps.pdf = true;
+    if (inputModalities.includes("audio")) caps.audioInput = true;
+    if (inputModalities.includes("video")) caps.videoInput = true;
+  }
+  const outputModalities = model.modalities?.output || model.architecture?.output_modalities;
+  if (Array.isArray(outputModalities)) {
+    if (outputModalities.includes("image")) caps.imageOutput = true;
+    if (outputModalities.includes("audio")) caps.audioOutput = true;
+  }
+  // OpenRouter advertises capabilities through supported_parameters.
+  const supportedParams = model.supported_parameters;
+  if (Array.isArray(supportedParams)) {
+    if (supportedParams.includes("tools")) caps.tools = true;
+    if (supportedParams.includes("reasoning")) caps.reasoning = true;
+  }
+  // Limits
+  const context = model.context_length ?? model.context_window ?? model.limit?.context;
+  const maxOutput =
+    model.max_completion_tokens ??
+    model.max_output_tokens ??
+    model.limit?.output ??
+    model.top_provider?.max_completion_tokens;
+  if (Number.isFinite(context) && context > 0) caps.contextWindow = context;
+  if (Number.isFinite(maxOutput) && maxOutput > 0) caps.maxOutput = maxOutput;
+
+  const out = {};
+  if (Object.keys(caps).length > 0) out.capabilities = caps;
+  if (Number.isFinite(context) && context > 0) out.contextLength = context;
+  return out;
 }
 
 function cacheKey(providerId, fetcher, connection) {
