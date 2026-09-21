@@ -2,6 +2,7 @@
 export {
   statsEmitter, trackPendingRequest, getActiveRequests,
   saveRequestUsage, getUsageHistory, getUsageStats, getChartData,
+  getUsagePerformanceRows,
   appendRequestLog, getRecentLogs,
   saveRequestDetail, getRequestDetails, getRequestDetailById, getRequestDetailsInRange,
   getLastRequestDetail, getRequestDetailByClientRequestId,
