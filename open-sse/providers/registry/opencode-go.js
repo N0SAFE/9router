@@ -35,7 +35,11 @@ export default {
   ],
   // supportedFormats follow the endpoint table in https://opencode.ai/docs/go/
   models: [
-    { id: "deepseek-flash", name: "DeepSeek V4.1 Flash", supportedFormats: ["openai"] },
+    // `vision: true` is declared here so the capability travels with the model
+    // list (`GET /v1/models` → bridge → VS Code) instead of clients guessing.
+    { id: "deepseek-flash", name: "DeepSeek V4.1 Flash", supportedFormats: ["openai"], vision: true, contextWindow: 1000000, maxOutput: 384000 },
+    // Live-catalog spelling of the same model (upstream /v1/models uses this id).
+    { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", supportedFormats: ["openai"], vision: true, contextWindow: 1000000, maxOutput: 384000 },
     { id: "glm-5.3-flash", name: "GLM 5.3 Flash (Vision)", supportedFormats: ["openai"] },
     { id: "glm-5.3", name: "GLM 5.3", supportedFormats: ["openai"] },
     { id: "glm-5.2", name: "GLM 5.2", supportedFormats: ["openai"] },

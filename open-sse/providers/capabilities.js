@@ -34,6 +34,75 @@
 
 import { matchPattern } from "./pricing.js";
 import { looksLikeVisionModel } from "./visionPatterns.js";
+import REGISTRY from "./registry/index.js";
+
+// Per-model capabilities declared by the provider's own model catalog (the
+// registry entries). This is the authoritative source: whatever a provider
+// declares here wins over the pattern tables and the synced catalog, so a
+// model's capabilities always travel with the model list itself
+// (`GET /v1/models`, `/v1/models/info`, the dashboard) and clients like the
+// VS Code bridge never need a hardcoded list.
+const CAPABILITY_FLAGS = [
+  "vision",
+  "pdf",
+  "audioInput",
+  "videoInput",
+  "imageOutput",
+  "audioOutput",
+  "search",
+  "tools",
+  "reasoning",
+  "thinkingFormat",
+  "thinkingCanDisable",
+  "contextWindow",
+  "maxOutput",
+];
+
+const DECLARED_CAPABILITIES = new Map();
+
+for (const entry of REGISTRY || []) {
+  if (!entry || !Array.isArray(entry.models)) continue;
+  const providerKeys = [entry.id, entry.alias, entry.uiAlias].filter(Boolean);
+  for (const model of entry.models) {
+    if (!model || typeof model !== "object" || !model.id) continue;
+    const declared = {};
+    let hasDeclaration = false;
+    if (model.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)) {
+      Object.assign(declared, model.capabilities);
+      hasDeclaration = true;
+    }
+    for (const flag of CAPABILITY_FLAGS) {
+      const value = model[flag];
+      if (value === undefined) continue;
+      if (typeof value === "boolean" || typeof value === "string" || (typeof value === "number" && Number.isFinite(value))) {
+        declared[flag] = value;
+        hasDeclaration = true;
+      }
+    }
+    if (hasDeclaration) {
+      for (const providerKey of providerKeys) {
+        DECLARED_CAPABILITIES.set(`${providerKey}:${model.id}`, declared);
+      }
+    }
+  }
+}
+
+/**
+ * Capabilities declared on the provider's model entry, if any.
+ * @param {string} provider provider id or alias
+ * @param {string} model raw model id (vendor prefix already stripped)
+ */
+export function declaredCapabilitiesFor(provider, model) {
+  if (!provider || !model) return null;
+  const exact = DECLARED_CAPABILITIES.get(`${provider}:${model}`);
+  if (exact) return exact;
+  // Registry ids use dots for versions; clients often send dashes.
+  const normalized = String(model).replace(/(\d)-(\d)/g, "$1.$2");
+  if (normalized !== model) {
+    return DECLARED_CAPABILITIES.get(`${provider}:${normalized}`) || null;
+  }
+  return null;
+}
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -450,7 +519,7 @@ function refine(base, provider, model) {
   return result;
 }
 
-export function getCapabilitiesForModel(provider, model) {
+function resolveCapabilities(provider, model) {
   if (!model) return { ...DEFAULT_CAPABILITIES };
 
   // Canonical exact lookup strips vendor prefix: "anthropic/claude-opus-4.7" -> "claude-opus-4.7".
@@ -476,4 +545,18 @@ export function getCapabilitiesForModel(provider, model) {
 
   // 4. Floor
   return refine(null, provider, model);
+}
+
+/**
+ * Full capability resolution: pattern tables first, then the provider's own
+ * per-model declarations overlaid on top (declared wins — it is the model list
+ * speaking), so `/v1/models` and the bridge always reflect the catalog.
+ */
+export function getCapabilitiesForModel(provider, model) {
+  const resolved = resolveCapabilities(provider, model);
+  if (!model) return resolved;
+  const baseModel = model.includes("/") ? model.split("/").pop() : model;
+  const declared =
+    declaredCapabilitiesFor(provider, model) || declaredCapabilitiesFor(provider, baseModel);
+  return declared ? { ...resolved, ...declared } : resolved;
 }
