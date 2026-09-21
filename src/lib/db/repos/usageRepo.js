@@ -263,6 +263,9 @@ export async function saveRequestUsage(entry) {
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
     // Optional small metadata (e.g. the one-line routing summary).
     const meta = entry.meta && typeof entry.meta === "object" ? entry.meta : {};
+    // Optional latency (ms): ttft is null for non-streaming requests.
+    const ttft = Number.isFinite(entry.latency?.ttft) && entry.latency.ttft > 0 ? Math.round(entry.latency.ttft) : null;
+    const total = Number.isFinite(entry.latency?.total) && entry.latency.total > 0 ? Math.round(entry.latency.total) : null;
 
     let inserted = false;
 
@@ -270,7 +273,7 @@ export async function saveRequestUsage(entry) {
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
     db.transaction(() => {
       const existing = db.get(
-        `SELECT id, endpoint FROM usageHistory
+        `SELECT id, endpoint, latencyTtft, latencyTotal FROM usageHistory
          WHERE timestamp = ?
            AND COALESCE(provider, '') = COALESCE(?, '')
            AND COALESCE(model, '') = COALESCE(?, '')
@@ -290,6 +293,9 @@ export async function saveRequestUsage(entry) {
         if (!existing.endpoint && entry.endpoint) {
           db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
         }
+        if ((total || ttft) && !existing.latencyTotal && !existing.latencyTtft) {
+          db.run(`UPDATE usageHistory SET latencyTtft = ?, latencyTotal = ? WHERE id = ?`, [ttft, total, existing.id]);
+        }
         if (Object.keys(meta).length > 0) {
           const row = db.get(`SELECT meta FROM usageHistory WHERE id = ?`, [existing.id]);
           const current = parseJson(row?.meta, {});
@@ -299,12 +305,12 @@ export async function saveRequestUsage(entry) {
       }
 
       db.run(
-        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta, latencyTtft, latencyTotal) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
           promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
-          stringifyJson(tokens), stringifyJson(meta),
+          stringifyJson(tokens), stringifyJson(meta), ttft, total,
         ]
       );
 
@@ -827,6 +833,69 @@ export async function getFilteredChartData(period = "7d", filters = {}) {
   const apiKeyRaw = await resolveApiKeyRaw(filters);
   const filteredRows = rows.filter((row) => matchesJsFilters(row, filters, { apiKeyRaw }));
   return bucketChartRows(filteredRows, { period });
+}
+
+/* ------------------------------------------------------------------------- *
+ * Performance rows (tokens + latency) for throughput analytics
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Rows for the Performance tab: tokens, cost, status and latency. Latency is
+ * captured per request since the performance release; rows recorded earlier
+ * carry nulls unless backfillUsageLatency() matched them.
+ */
+export async function getUsagePerformanceRows(filter = {}, limit = 50000) {
+  const db = await getAdapter();
+  const conds = [];
+  const params = [];
+
+  if (filter.provider) { conds.push("provider = ?"); params.push(filter.provider); }
+  if (filter.model) { conds.push("model = ?"); params.push(filter.model); }
+  if (filter.connectionId) { conds.push("connectionId = ?"); params.push(filter.connectionId); }
+  if (filter.apiKey) { conds.push("apiKey = ?"); params.push(filter.apiKey); }
+  if (filter.status) {
+    if (filter.status === "success") {
+      conds.push("(status IS NULL OR status IN ('ok', 'success'))");
+    } else if (filter.status === "failed") {
+      conds.push("status IS NOT NULL AND status NOT IN ('ok', 'success')");
+    } else {
+      conds.push("status = ?");
+      params.push(filter.status);
+    }
+  }
+  if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
+  if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
+
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const capped = Math.max(1, Math.min(Number(limit) || 50000, 200000));
+  const rows = db.all(
+    `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, status,
+            promptTokens, completionTokens, cost, tokens, latencyTtft, latencyTotal
+     FROM usageHistory ${where} ORDER BY id DESC LIMIT ${capped}`,
+    params
+  );
+
+  return rows.map((row) => {
+    const tokens = parseJson(row.tokens, {}) || {};
+    const promptTokens = tokens.prompt_tokens ?? row.promptTokens ?? 0;
+    const completionTokens = tokens.completion_tokens ?? row.completionTokens ?? 0;
+    return {
+      timestamp: row.timestamp,
+      provider: row.provider || null,
+      model: row.model || null,
+      connectionId: row.connectionId || null,
+      apiKey: row.apiKey || null,
+      endpoint: row.endpoint || null,
+      status: row.status || "ok",
+      promptTokens,
+      completionTokens,
+      cachedTokens: tokens.cached_tokens ?? tokens.cache_read_input_tokens ?? 0,
+      reasoningTokens: tokens.reasoning_tokens ?? 0,
+      costUsd: Number(row.cost) || 0,
+      ttft: Number(row.latencyTtft) > 0 ? Number(row.latencyTtft) : null,
+      total: Number(row.latencyTotal) > 0 ? Number(row.latencyTotal) : null,
+    };
+  });
 }
 
 export async function getChartData(period = "7d", filters = null) {

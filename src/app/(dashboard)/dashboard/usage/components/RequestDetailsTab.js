@@ -323,6 +323,24 @@ function CollapsibleSection({ title, children, defaultOpen = false, icon = null 
   );
 }
 
+function num(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** Per-request throughput: output (decode) and input (prefill) tokens/second. */
+function requestSpeeds(detail) {
+  const tokens = detail?.tokens || {};
+  const input = num(tokens.prompt_tokens ?? tokens.input_tokens);
+  const output = num(tokens.completion_tokens ?? tokens.output_tokens);
+  const ttft = num(detail?.latency?.ttft);
+  const total = num(detail?.latency?.total);
+  const inputSpeed = ttft > 0 && input > 0 ? input / (ttft / 1000) : null;
+  const generationMs = total > 0 ? (ttft > 0 && total > ttft ? total - ttft : total) : 0;
+  const outputSpeed = generationMs > 0 && output > 0 ? output / (generationMs / 1000) : null;
+  return { inputSpeed, outputSpeed };
+}
+
 export default function RequestDetailsTab() {
   const searchParams = useSearchParams();
   const { filters, queryString, patchFilters, clearFilters, activeCount } = useUsageFilters();
@@ -582,12 +600,25 @@ export default function RequestDetailsTab() {
                       </td>
                       <td className="p-4 text-right font-mono text-sm text-text-main tabular-nums">{fmtCost(detail.cost)}</td>
                       <td className="whitespace-nowrap p-4 text-xs text-text-muted">
-                        {detail.latency?.total ? (
-                          <>
-                            <span className="font-mono tabular-nums">{fmtDuration(detail.latency?.ttft)}</span> TTFT
-                            <span className="block font-mono tabular-nums">{fmtDuration(detail.latency?.total)} total</span>
-                          </>
-                        ) : (
+                        {detail.latency?.total ? (() => {
+                          const speeds = requestSpeeds(detail);
+                          return (
+                            <>
+                              <span className="font-mono tabular-nums">{fmtDuration(detail.latency?.ttft)}</span> TTFT
+                              <span className="block font-mono tabular-nums">{fmtDuration(detail.latency?.total)} total</span>
+                              {speeds.outputSpeed !== null && (
+                                <span className="block font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
+                                  {speeds.outputSpeed.toFixed(1)} tok/s out
+                                </span>
+                              )}
+                              {speeds.inputSpeed !== null && (
+                                <span className="block font-mono tabular-nums text-sky-600 dark:text-sky-400">
+                                  {speeds.inputSpeed.toFixed(0)} tok/s in
+                                </span>
+                              )}
+                            </>
+                          );
+                        })() : (
                           <span className="text-text-subtle">—</span>
                         )}
                       </td>
@@ -662,6 +693,22 @@ export default function RequestDetailsTab() {
                   value: selectedDetail.latency?.total
                     ? `${fmtDuration(selectedDetail.latency?.ttft)} / ${fmtDuration(selectedDetail.latency?.total)}`
                     : "—",
+                },
+                {
+                  label: "Output speed",
+                  value: (() => {
+                    const speed = requestSpeeds(selectedDetail).outputSpeed;
+                    return speed === null ? "—" : `${speed.toFixed(1)} tok/s`;
+                  })(),
+                  sub: "generated tokens / generation time",
+                },
+                {
+                  label: "Input speed",
+                  value: (() => {
+                    const speed = requestSpeeds(selectedDetail).inputSpeed;
+                    return speed === null ? "—" : `${speed.toFixed(0)} tok/s`;
+                  })(),
+                  sub: "prompt tokens / TTFT (approx.)",
                 },
               ].map((item) => (
                 <div key={item.label} className="rounded-[10px] border border-border-subtle bg-bg p-3">
