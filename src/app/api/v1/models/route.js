@@ -21,7 +21,8 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
-import { withNoAuthProviders, fetchNoAuthModels } from "@/lib/providers/noAuthProviders";
+import { getModelParameters } from "open-sse/providers/modelParameters.js";
+import { withNoAuthProviders } from "@/lib/providers/noAuthProviders";
 import { fetchConnectionModels } from "@/lib/providers/liveModels";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
@@ -681,6 +682,7 @@ export async function buildModelsList(kindFilter, options = {}) {
           ? { ...computedCaps, ...(liveModelCaps || {}) }
           : liveModelCaps || null;
         if (caps) model.capabilities = caps;
+
         // Token limits under the snake_case names the OpenAI/OpenRouter
         // convention uses. `capabilities.contextWindow` is camelCase and nested,
         // so clients matching context_length find nothing, fall back to guessing
@@ -704,6 +706,16 @@ export async function buildModelsList(kindFilter, options = {}) {
           if (Number.isFinite(liveContext)) contextWindow = liveContext;
           if (Number.isFinite(contextWindow)) model.context_length = contextWindow;
           if (Number.isFinite(maxOutput)) model.max_completion_tokens = maxOutput;
+          // Settings descriptor: which request parameters this model accepts
+          // (reasoning levels, temperature, output ceiling, tools, …) so clients
+          // can render/adjust them without a hardcoded table.
+          try {
+            model.parameters = getModelParameters(providerId, modelId, {
+              maxOutput: Number.isFinite(maxOutput) ? maxOutput : undefined,
+            }).parameters;
+          } catch {
+            // leave parameters off when a provider/model descriptor fails
+          }
         }
         models.push(model);
       }
