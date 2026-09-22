@@ -23,6 +23,7 @@
  */
 
 import { checkFallbackError, matchFallbackRule } from "./accountFallback.js";
+import { TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 
 export const POOL_ACTIONS = {
@@ -144,12 +145,12 @@ export function classifyPoolError(status, errorText, backoffLevel = 0) {
     return { action: POOL_ACTIONS.NON_FALLBACK, cooldownMs: 0, newBackoffLevel: backoffLevel };
   }
 
-  const fallback = checkFallbackError(status, errorText, backoffLevel);
-  return {
-    action: fallback.shouldFallback ? POOL_ACTIONS.FALLBACK : POOL_ACTIONS.NON_FALLBACK,
-    cooldownMs: fallback.cooldownMs,
-    newBackoffLevel: fallback.newBackoffLevel ?? backoffLevel,
-  };
+  // Unknown errors keep the pool's legacy rotation: with several connections,
+  // trying the next account beats failing the request. The pool's own
+  // isRequestScopedError() above already stopped rotation for the request-scoped
+  // phrasings it knows, so accountFallback's blanket 4xx guard (which serves the
+  // single-account path) must not turn these into a hard failure here.
+  return { action: POOL_ACTIONS.FALLBACK, cooldownMs: TRANSIENT_COOLDOWN_MS, newBackoffLevel: backoffLevel };
 }
 
 // ---------------------------------------------------------------------------
