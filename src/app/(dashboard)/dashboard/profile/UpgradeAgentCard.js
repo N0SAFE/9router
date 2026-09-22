@@ -62,7 +62,7 @@ export default function UpgradeAgentCard() {
     setMessage(null);
     try {
       const res = await fetch("/api/settings", {
-        method: "POST",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ upgradeModel: value }),
       });
