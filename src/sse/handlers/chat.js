@@ -56,6 +56,8 @@ import {
 } from "@/lib/keys/enforce.js";
 import { beginKeyRequest, endKeyRequest } from "@/lib/keys/concurrency.js";
 import { isConnectionAllowed } from "@/lib/keys/policy.js";
+import { registerSessionStart } from "@/lib/usage/liveSessions.js";
+import { liveKeyForRequest } from "@/lib/usage/sessions.js";
 
 /**
  * Handle chat completion request
@@ -171,6 +173,34 @@ export async function handleChat(request, clientRawRequest = null) {
   }
 
   const requiredCapabilities = detectRequiredCapabilities(body);
+
+  // Announce the session start before routing so the Sessions tab can list and
+  // attach to a session while its first request is still generating (details
+  // are only written when a request finishes).
+  try {
+    const meta = body?.metadata && typeof body.metadata === "object" ? body.metadata : {};
+    const explicitSessionId = typeof meta.sessionId === "string" && meta.sessionId.trim()
+      ? meta.sessionId.trim()
+      : (typeof meta.conversationId === "string" && meta.conversationId.trim() ? meta.conversationId.trim() : null);
+    const slash = typeof modelStr === "string" ? modelStr.indexOf("/") : -1;
+    const messages = Array.isArray(body?.messages) ? body.messages : [];
+    const firstUser = messages.find((message) => message?.role === "user");
+    const firstText = typeof firstUser?.content === "string"
+      ? firstUser.content
+      : Array.isArray(firstUser?.content)
+        ? firstUser.content.map((part) => part?.text || "").join(" ")
+        : "";
+    registerSessionStart({
+      sessionId: explicitSessionId,
+      liveKey: explicitSessionId ? null : liveKeyForRequest({ apiKey, messages }),
+      provider: slash > 0 ? modelStr.slice(0, slash) : null,
+      model: slash > 0 ? modelStr.slice(slash + 1) : modelStr,
+      label: firstText.slice(0, 96) || null,
+      apiKey,
+    });
+  } catch {
+    // the live registry is best-effort and must never break routing
+  }
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);

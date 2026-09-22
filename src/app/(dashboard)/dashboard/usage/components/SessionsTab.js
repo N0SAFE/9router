@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Area,
   AreaChart,
@@ -22,6 +23,26 @@ const VIEWS = [
   { value: "timeline", label: "Timeline" },
   { value: "chat", label: "Chat" },
 ];
+
+const TIMELINE_MODES = [
+  { value: "waterfall", label: "Waterfall" },
+  { value: "relative", label: "Relative" },
+];
+
+function fmtOffset(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "+0s";
+  if (ms < 60000) return `+${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.round((ms % 60000) / 1000);
+  return `+${minutes}m${String(seconds).padStart(2, "0")}s`;
+}
+
+function fmtDurationMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(2)}s`;
+  return `${Math.floor(ms / 60000)}m${String(Math.round((ms % 60000) / 1000)).padStart(2, "0")}s`;
+}
 
 function costTone(turn, maxCost) {
   if (!turn.costUsd || !maxCost) return "bg-emerald-500/70";
@@ -64,11 +85,14 @@ function SpikeIcon({ flags }) {
 }
 
 export default function SessionsTab() {
+  const searchParams = useSearchParams();
+  const requestedSession = searchParams.get("session");
   const [sessions, setSessions] = useState([]);
   const [counts, setCounts] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [session, setSession] = useState(null);
   const [view, setView] = useState("timeline");
+  const [timelineMode, setTimelineMode] = useState("waterfall");
   const [live, setLive] = useState(true);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -90,21 +114,27 @@ export default function SessionsTab() {
       setSessions(payload.sessions || []);
       setCounts(payload.counts || null);
       setError("");
-      setSelectedId((current) => current || payload.sessions?.[0]?.id || null);
+      setSelectedId((current) => requestedSession || current || payload.sessions?.[0]?.id || null);
     } catch (err) {
       setError(String(err?.message || err));
     } finally {
       setLoading(false);
     }
-  }, [query]);
+  }, [query, requestedSession]);
 
   useEffect(() => {
-    // Initial load + refresh when the search changes.
+    // Initial load + refresh when the search changes (live sessions appear fast).
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshList();
-    const timer = setInterval(refreshList, 15000);
+    const timer = setInterval(refreshList, 5000);
     return () => clearInterval(timer);
   }, [refreshList]);
+
+  useEffect(() => {
+    // Deep link from the routing canvas: ?tab=sessions&session=<id>
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (requestedSession) setSelectedId(requestedSession);
+  }, [requestedSession]);
   // Streamed session detail (SSE) — snapshot then live updates.
   useEffect(() => {
     if (!selectedId) return undefined;
@@ -172,6 +202,21 @@ export default function SessionsTab() {
     [turns]
   );
   const spikeIds = useMemo(() => new Set((session?.spikes?.flagged || []).map((entry) => entry.turnId)), [session]);
+
+  const timeline = useMemo(() => {
+    if (turns.length === 0) return null;
+    const starts = turns
+      .map((turn) => new Date(turn.timestamp || 0).getTime())
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const startMs = starts.length > 0 ? Math.min(...starts) : 0;
+    const endMs = Math.max(
+      ...turns.map((turn) => (new Date(turn.timestamp || 0).getTime() || startMs) + (turn.total || 0))
+    );
+    const span = Math.max(1, endMs - startMs);
+    const activeTotal = turns.reduce((sum, turn) => sum + (turn.total || 0), 0);
+    const maxTurnDuration = Math.max(1, ...turns.map((turn) => turn.total || 0));
+    return { startMs, endMs, span, activeTotal, maxTurnDuration, mostlyIdle: span > Math.max(120000, activeTotal * 12) };
+  }, [turns]);
 
   const saveMonitor = useCallback(
     async (patch) => {
@@ -254,7 +299,11 @@ export default function SessionsTab() {
                   )}
                 >
                   <span className="flex items-center gap-1.5">
-                    {entry.live ? <span className="size-1.5 rounded-full bg-emerald-500" title="live" /> : null}
+                    {entry.generating ? (
+                      <span className="material-symbols-outlined animate-spin text-[12px] text-sky-500" title="generating now">progress_activity</span>
+                    ) : entry.live ? (
+                      <span className="size-1.5 rounded-full bg-emerald-500" title="live" />
+                    ) : null}
                     {entry.monitored ? <span className="material-symbols-outlined text-[13px] text-brand-500">visibility</span> : null}
                     {entry.budgetExceeded ? <span className="material-symbols-outlined text-[13px] text-danger">battery_alert</span> : null}
                     <span className="truncate text-xs font-medium text-text-main">{entry.label || entry.id}</span>
@@ -290,6 +339,7 @@ export default function SessionsTab() {
                   <div className="flex items-center gap-2">
                     <h3 className="truncate text-sm font-semibold text-text-main">{selectedSummary?.label || session.id}</h3>
                     {session.live ? <Badge variant="success" size="sm" dot>live</Badge> : null}
+                    {session.generating ? <Badge variant="info" size="sm">generating…</Badge> : null}
                     <Badge variant={session.kind === "explicit" ? "primary" : "neutral"} size="sm">
                       {session.kind}
                     </Badge>
@@ -419,14 +469,56 @@ export default function SessionsTab() {
 
               {/* Timeline / Chat */}
               <div className="min-w-0">
-                {view === "timeline" ? (
-                  <div className="flex max-h-[520px] min-w-0 flex-col overflow-y-auto rounded-[10px] border border-border-subtle">
-                    <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border-subtle bg-bg/95 px-2.5 py-1.5 text-[10px] uppercase tracking-wide text-text-muted backdrop-blur">
-                      <span className="w-16">Time</span>
-                      <span className="flex-1">Duration</span>
-                      <span className="w-48 text-right">Metrics</span>
+                {turns.length === 0 ? (
+                  <div className="flex flex-col items-center gap-2 rounded-[10px] border border-border-subtle py-10 text-center">
+                    <span className="material-symbols-outlined animate-spin text-[22px] text-sky-500">progress_activity</span>
+                    <p className="text-sm text-text-main">Generating the first turn…</p>
+                    <p className="text-xs text-text-muted">
+                      The request is in flight — the timeline and chat fill in the moment it finishes.
+                    </p>
+                  </div>
+                ) : view === "timeline" ? (
+                  <div className="flex min-w-0 flex-col rounded-[10px] border border-border-subtle">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-subtle px-2.5 py-1.5">
+                      <span className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-text-muted">
+                        <span className="material-symbols-outlined text-[14px]">waterfall_chart</span>
+                        Waterfall
+                        <span className="normal-case tracking-normal text-text-subtle">
+                          span {fmtDurationMs(timeline?.span)} · active {fmtDurationMs(timeline?.activeTotal)}
+                        </span>
+                      </span>
+                      <SegmentedControl options={TIMELINE_MODES} value={timelineMode} onChange={setTimelineMode} size="sm" />
                     </div>
-                    {turns.map((turn) => (
+                    {timeline?.mostlyIdle && timelineMode === "waterfall" ? (
+                      <p className="border-b border-border-subtle bg-warning/5 px-2.5 py-1 text-[10px] text-warning">
+                        Turns are spread over a long window — use Relative to compare durations.
+                      </p>
+                    ) : null}
+                    <div className="flex items-center gap-2 border-b border-border-subtle bg-bg/60 px-2.5 py-1 text-[9px] text-text-subtle">
+                      <span className="w-32 shrink-0">turn · started</span>
+                      <span className="relative h-3 min-w-0 flex-1">
+                        {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
+                          <span key={fraction} className="absolute top-0 h-3 border-l border-border/70" style={{ left: `${fraction * 100}%` }}>
+                            <span className="whitespace-nowrap pl-0.5">
+                              {timelineMode === "relative" ? "" : fmtOffset(fraction * (timeline?.span || 0))}
+                            </span>
+                          </span>
+                        ))}
+                      </span>
+                      <span className="w-60 shrink-0 text-right">metrics</span>
+                    </div>
+                    <div className="max-h-[520px] min-w-0 overflow-y-auto">
+                      {turns.map((turn) => {
+                        const startedMs = new Date(turn.timestamp || 0).getTime() || timeline?.startMs || 0;
+                        const offset = Math.max(0, startedMs - (timeline?.startMs || 0));
+                        const duration = turn.total || 0;
+                        const prefill = Math.min(turn.ttft || 0, duration);
+                        const denominator = timelineMode === "relative" ? (timeline?.maxTurnDuration || 1) : (timeline?.span || 1);
+                        const leftPct = timelineMode === "relative" ? 0 : (offset / denominator) * 100;
+                        const widthPct = Math.max(0.35, (duration / denominator) * 100);
+                        const failed = Boolean(turn.status && !["ok", "success"].includes(turn.status));
+                        const toolCount = turn.toolCalls?.length || 0;
+                        return (
                       <div key={turn.id || turn.index} className="border-b border-border-subtle last:border-b-0">
                         <button
                           type="button"
@@ -436,18 +528,50 @@ export default function SessionsTab() {
                             spikeIds.has(turn.id) && "bg-warning/5"
                           )}
                         >
-                          <span className="w-16 shrink-0 font-mono text-[10px] text-text-muted">{flushName(turn)}</span>
-                          <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                            <SpikeIcon flags={turn.flags} />
-                            <span className="relative h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2">
-                              <span
-                                className={cn("absolute inset-y-0 left-0 rounded-full", costTone(turn, maxCost))}
-                                style={{ width: `${Math.max(2, ((turn.total || 0) / maxTotal) * 100)}%` }}
-                              />
+                          <span className="w-32 shrink-0">
+                            <span className="block truncate font-mono text-[10px] text-text-main">
+                              #{turn.index + 1} · {flushName(turn)}
                             </span>
-                            <span className="shrink-0 font-mono text-[10px] text-text-muted">{turn.total ? fmtDuration(turn.total) : "—"}</span>
+                            <span className="block text-[9px] text-text-subtle">
+                              {timelineMode === "relative" ? fmtDurationMs(duration) : fmtOffset(offset)}
+                            </span>
                           </span>
-                          <span className="w-48 shrink-0 text-right">
+                          <span className="relative h-6 min-w-0 flex-1">
+                            {[0.25, 0.5, 0.75].map((fraction) => (
+                              <span key={fraction} className="absolute inset-y-0 border-l border-border/40" style={{ left: `${fraction * 100}%` }} />
+                            ))}
+                            <span className="absolute inset-y-0" style={{ left: `${leftPct}%`, width: `${widthPct}%`, minWidth: 3 }}>
+                              <span
+                                className="absolute inset-y-1.5 left-0 right-0 flex overflow-hidden rounded-[3px] ring-1 ring-inset ring-black/5"
+                                title={`#${turn.index + 1} ${turn.model || ""} · ${fmtDurationMs(duration)} · TTFT ${turn.ttft ? `${turn.ttft}ms` : "—"} · ${turn.tokens.input} in / ${turn.tokens.output} out · ${fmtCost(turn.costUsd)}${toolCount ? ` · ${toolCount} tool call(s)` : ""}`}
+                              >
+                                {failed ? (
+                                  <span className="h-full w-full bg-red-500/80" />
+                                ) : (
+                                  <>
+                                    <span className="h-full bg-cyan-500/70" style={{ width: `${duration > 0 ? (prefill / duration) * 100 : 0}%` }} />
+                                    <span className={cn("h-full flex-1", costTone(turn, maxCost))} />
+                                  </>
+                                )}
+                              </span>
+                              {spikeIds.has(turn.id) ? (
+                                <span
+                                  className="absolute -top-1 left-1/2 -translate-x-1/2 text-[11px] leading-none"
+                                  title={turn.flags?.map((flag) => flag.message).join("\n")}
+                                >
+                                  🔥
+                                </span>
+                              ) : null}
+                              {toolCount > 0 ? (
+                                <span className="absolute -bottom-0.5 left-0 flex gap-0.5">
+                                  {Array.from({ length: Math.min(toolCount, 6) }, (_, index) => (
+                                    <span key={index} className="size-1.5 rounded-full bg-amber-500 ring-1 ring-bg" />
+                                  ))}
+                                </span>
+                              ) : null}
+                            </span>
+                          </span>
+                          <span className="w-60 shrink-0 text-right">
                             <TurnBadges turn={turn} />
                           </span>
                         </button>
@@ -490,7 +614,24 @@ export default function SessionsTab() {
                           </div>
                         ) : null}
                       </div>
-                    ))}
+                        );
+                      })}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 border-t border-border-subtle px-2.5 py-1 text-[10px] text-text-muted">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="inline-block h-2 w-3 rounded-sm bg-cyan-500/70" /> prefill (TTFT)
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="inline-block h-2 w-3 rounded-sm bg-emerald-500/80" /> generation
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="inline-block size-1.5 rounded-full bg-amber-500" /> tool calls
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="inline-block size-1.5 rounded-full bg-red-500" /> failed
+                      </span>
+                      <span className="ml-auto">bar width = duration · colour = cost vs session max</span>
+                    </div>
                   </div>
                 ) : (
                   <div className="flex max-h-[520px] min-w-0 flex-col gap-3 overflow-y-auto rounded-[10px] border border-border-subtle p-3">

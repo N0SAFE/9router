@@ -1,5 +1,6 @@
 import { detailsEmitter } from "@/lib/db/index.js";
 import { buildSessionPayload } from "@/lib/usage/sessionPayload";
+import { liveSessionsEmitter } from "@/lib/usage/liveSessions";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,20 @@ export async function GET(request, { params }) {
 
       detailsEmitter.on("detail", onDetail);
 
+      // A session that is still generating has no detail yet: push an update as
+      // soon as its request starts so the client can attach immediately.
+      const onSessionEvent = async (event) => {
+        if (closed) return;
+        const entry = event?.session;
+        if (!entry) return;
+        if (entry.sessionId && entry.sessionId !== sessionId) return;
+        const payload = await snapshot();
+        if (payload?.missing) return;
+        if (entry.liveKey && payload.liveKey && entry.liveKey !== payload.liveKey) return;
+        send("update", payload);
+      };
+      liveSessionsEmitter.on("session", onSessionEvent);
+
       heartbeat = setInterval(() => {
         if (closed) {
           clearInterval(heartbeat);
@@ -76,6 +91,7 @@ export async function GET(request, { params }) {
       const cleanup = () => {
         closed = true;
         detailsEmitter.off("detail", onDetail);
+        liveSessionsEmitter.off("session", onSessionEvent);
         if (heartbeat) clearInterval(heartbeat);
         try {
           controller.close();

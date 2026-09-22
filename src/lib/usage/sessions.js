@@ -43,15 +43,35 @@ function messageSignature(message) {
   return `${message?.role || "?"}:${messageText(message).slice(0, 200)}:${Array.isArray(message?.tool_calls) ? message.tool_calls.length : 0}`;
 }
 
+function hashText(text) {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) | 0;
+  }
+  return hash.toString(36);
+}
+
 function fingerprintOf(detail) {
   const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
   const firstUser = messages.find((message) => message?.role === "user");
-  const seed = `${detail?.provider || ""}|${detail?.model || ""}|${messageText(firstUser).slice(0, 300)}|${detail?.request?.metadata?.clientRequestId ? "" : ""}`;
-  let hash = 0;
-  for (let index = 0; index < seed.length; index += 1) {
-    hash = (hash * 31 + seed.charCodeAt(index)) | 0;
-  }
-  return `${detail?.provider || "unknown"}|${hash.toString(36)}`;
+  const seed = `${detail?.provider || ""}|${detail?.model || ""}|${messageText(firstUser).slice(0, 300)}`;
+  return `${detail?.provider || "unknown"}|${hashText(seed)}`;
+}
+
+/**
+ * Loose identity used to attach in-flight requests to a session before the
+ * provider/model resolution is known: api key + first user message.
+ */
+export function liveKeyForDetail(detail) {
+  const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
+  const firstUser = messages.find((message) => message?.role === "user");
+  return `${detail?.apiKey || "nokey"}|${hashText(messageText(firstUser).slice(0, 300))}`;
+}
+
+export function liveKeyForRequest({ apiKey, messages } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const firstUser = list.find((message) => message?.role === "user");
+  return `${apiKey || "nokey"}|${hashText(messageText(firstUser).slice(0, 300))}`;
 }
 
 function tokenMetrics(detail) {
@@ -92,24 +112,64 @@ export function groupImplicitSessions(details = [], { idleMs = DEFAULT_IDLE_MS }
   for (const detail of sorted) {
     if (sessionIdOf(detail)) continue;
     if (!detail?.timestamp) continue;
-    const key = `${detail?.apiKey || "nokey"}|${fingerprintOf(detail)}`;
+    const mergeKey = mergeKeyForDetail(detail);
     const time = new Date(detail.timestamp).getTime();
-    const open = openBucketByKey.get(key);
-    if (open && time - open.lastAt <= idleMs) {
+    const open = openBucketByKey.get(mergeKey);
+    // A bucket continues only when the request extends the same conversation
+    // (its history starts with the previous request's messages) and does not
+    // overlap it in time — that keeps two concurrent sessions apart even when
+    // they send the same first prompt.
+    const continues = open && time - open.lastAt <= idleMs && conversationContinues(open, detail) && !overlapsInFlight(open, detail);
+    if (continues) {
       open.details.push(detail);
       open.lastAt = time;
     } else {
-      const bucket = { key, startedAt: detail.timestamp, lastAt: time, details: [detail] };
-      openBucketByKey.set(key, bucket);
+      const bucket = { key: mergeKey, mergeKey, startedAt: detail.timestamp, lastAt: time, details: [detail] };
+      openBucketByKey.set(mergeKey, bucket);
       buckets.push(bucket);
     }
   }
 
   return buckets.map((bucket) => ({
-    id: `implicit:${bucket.key}:${bucket.startedAt}`,
+    id: `implicit:${bucket.mergeKey}:${bucket.startedAt}`,
+    mergeKey: bucket.mergeKey,
+    liveKey: liveKeyForDetail(bucket.details[0]),
     kind: "implicit",
     details: bucket.details,
   }));
+}
+
+/** Stable key for an implicit conversation: api key + provider/model + history fingerprint. */
+export function mergeKeyForDetail(detail) {
+  return `${detail?.apiKey || "nokey"}|${fingerprintOf(detail)}`;
+}
+
+/** Same key computed from a request body (used to register in-flight sessions). */
+export function mergeKeyForRequest({ apiKey, provider, model, messages }) {
+  return `${apiKey || "nokey"}|${fingerprintOf({ provider, model, request: { messages } })}`;
+}
+
+/** The new request's history must start with the previous request's messages. */
+function conversationContinues(bucket, detail) {
+  const previous = bucket.details[bucket.details.length - 1];
+  const prevMessages = Array.isArray(previous?.request?.messages) ? previous.request.messages : [];
+  const nextMessages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
+  if (prevMessages.length === 0) return true;
+  if (nextMessages.length < prevMessages.length) return false;
+  for (let index = 0; index < prevMessages.length; index += 1) {
+    if (messageSignature(prevMessages[index]) !== messageSignature(nextMessages[index])) return false;
+  }
+  return true;
+}
+
+/** A request that starts before the previous one finished belongs to another session. */
+function overlapsInFlight(bucket, detail) {
+  const previous = bucket.details[bucket.details.length - 1];
+  const prevStart = previous?.timestamp ? new Date(previous.timestamp).getTime() : 0;
+  const prevTotal = Number(previous?.latency?.total) || 0;
+  const nextStart = detail?.timestamp ? new Date(detail.timestamp).getTime() : 0;
+  if (!prevStart || !nextStart || prevTotal <= 0) return false;
+  return nextStart < prevStart + prevTotal;
 }
 
 export function implicitSessionMatches(sessionId, group) {

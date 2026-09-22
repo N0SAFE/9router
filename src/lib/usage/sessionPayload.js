@@ -14,22 +14,34 @@ import {
   buildSessionTurns,
   detectSpikes,
   groupImplicitSessions,
+  liveKeyForDetail,
   summarizeSession,
 } from "./sessions.js";
 import { getSessionMonitor } from "./sessionMonitors.js";
+import { findGeneratingSession } from "./liveSessions.js";
 
 const LIVE_WINDOW_MS = 90 * 1000;
 
 async function loadSessionDetails(sessionId) {
-  if (!sessionId) return { details: [], kind: "unknown" };
+  if (!sessionId) return { details: [], kind: "unknown", liveKey: null };
   if (sessionId.startsWith("implicit:")) {
     const recent = await getRecentDetailRows(1000);
     const groups = groupImplicitSessions(recent);
     const match = groups.find((group) => group.id === sessionId);
-    return { details: match?.details || [], kind: "implicit" };
+    return { details: match?.details || [], kind: "implicit", liveKey: match?.liveKey || null };
+  }
+  if (sessionId.startsWith("live:")) {
+    const liveKey = sessionId.slice("live:".length);
+    const recent = await getRecentDetailRows(1000);
+    const match = groupImplicitSessions(recent).find((group) => group.liveKey === liveKey);
+    return { details: match?.details || [], kind: "implicit", liveKey };
   }
   const details = await getDetailsBySession(sessionId, 1000);
-  return { details, kind: "explicit" };
+  return {
+    details,
+    kind: "explicit",
+    liveKey: details.length > 0 ? liveKeyForDetail(details[0]) : null,
+  };
 }
 
 function stripContent(turns) {
@@ -42,9 +54,47 @@ function stripContent(turns) {
 }
 
 export async function buildSessionPayload(sessionId, options = {}) {
-  const { details, kind } = await loadSessionDetails(sessionId);
+  const { details, kind, liveKey } = await loadSessionDetails(sessionId);
+  const generatingEntry = findGeneratingSession({
+    sessionId: kind === "explicit" ? sessionId : null,
+    liveKey,
+  });
+
   if (details.length === 0) {
-    return { id: sessionId, kind, missing: true, summary: null, turns: [], spikes: { flagged: [] } };
+    if (generatingEntry) {
+      // Session is running but its first request has not finished yet.
+      const monitor = await getSessionMonitor(sessionId);
+      return {
+        id: sessionId,
+        kind,
+        liveKey,
+        missing: false,
+        generating: true,
+        live: true,
+        summary: {
+          label: generatingEntry.label || "running session",
+          startedAt: generatingEntry.startedAt,
+          lastAt: new Date(generatingEntry.lastEventAt).toISOString(),
+          requests: generatingEntry.requests,
+          failures: 0,
+          tokens: 0,
+          cachedTokens: 0,
+          costUsd: 0,
+          providers: [],
+          models: generatingEntry.model ? [generatingEntry.model] : [],
+          apiKey: generatingEntry.apiKey || null,
+          connectionId: null,
+          kinds: [],
+        },
+        turns: [],
+        spikes: { flagged: [], costMedian: 0, tokenMedian: 0 },
+        monitor,
+        budget: null,
+        contentMode: "full",
+        generatedAt: new Date().toISOString(),
+      };
+    }
+    return { id: sessionId, kind, liveKey, missing: true, summary: null, turns: [], spikes: { flagged: [] } };
   }
 
   const [settings, connections] = await Promise.all([
@@ -86,6 +136,7 @@ export async function buildSessionPayload(sessionId, options = {}) {
   return {
     id: sessionId,
     kind,
+    liveKey,
     missing: false,
     summary,
     turns,
@@ -93,7 +144,8 @@ export async function buildSessionPayload(sessionId, options = {}) {
     monitor,
     budget,
     contentMode,
-    live: lastAt > 0 && Date.now() - lastAt < LIVE_WINDOW_MS,
+    generating: Boolean(generatingEntry),
+    live: (lastAt > 0 && Date.now() - lastAt < LIVE_WINDOW_MS) || Boolean(generatingEntry),
     generatedAt: new Date().toISOString(),
   };
 }
@@ -181,6 +233,7 @@ export async function listImplicitSessions(limit = 100) {
     return {
       id: group.id,
       kind: "implicit",
+      liveKey: group.liveKey || null,
       label: summary.label,
       provider: summary.providers[0] || null,
       model: summary.models[0] || null,

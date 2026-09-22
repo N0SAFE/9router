@@ -85,6 +85,25 @@ describe("session analytics", () => {
     expect(flagged[0].flags.map((flag) => flag.code)).toContain("cost_spike");
   });
 
+  it("keeps concurrent sessions apart even with the same first prompt", () => {
+    const details = [
+      detail({ id: "a", ts: "2026-09-22T10:00:00.000Z", user: "same prompt", tokens: baseTokens, cost: 0.01, ttft: 1000, total: 30000 }),
+      // Starts while the first request is still generating: a different session.
+      detail({ id: "b", ts: "2026-09-22T10:00:10.000Z", user: "same prompt", tokens: baseTokens, cost: 0.01, ttft: 1000, total: 30000 }),
+    ];
+    const groups = groupImplicitSessions(details);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("registers in-flight sessions for attach-before-first-turn", async () => {
+    const { registerSessionStart, listLiveSessions, findGeneratingSession } = await import("../../src/lib/usage/liveSessions.js");
+    registerSessionStart({ sessionId: "live-test-explicit", label: "explicit", provider: "p", model: "m" });
+    expect(findGeneratingSession({ sessionId: "live-test-explicit" })?.generating).toBe(true);
+    registerSessionStart({ liveKey: "live-test-key", label: "implicit" });
+    expect(findGeneratingSession({ liveKey: "live-test-key" })?.id).toBe("live:live-test-key");
+    expect(listLiveSessions().some((entry) => entry.id === "live:live-test-key")).toBe(true);
+  });
+
   it("summarizes a session and computes budget progress", () => {
     const details = [
       detail({ id: "a", ts: "2026-09-22T10:00:00.000Z", user: "hello world", tokens: baseTokens, cost: 0.01, ttft: 1000, total: 3000 }),

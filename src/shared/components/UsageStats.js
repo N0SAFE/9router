@@ -44,15 +44,96 @@ function TimeAgo({ timestamp }) {
 }
 
 function RecentRequests({ requests = [], onSelect }) {
+  const router = useRouter();
+  const [tab, setTab] = useState("recent");
+  const [liveSessions, setLiveSessions] = useState([]);
+
+  useEffect(() => {
+    if (tab !== "live") return undefined;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/usage/sessions?limit=20&live=1", { cache: "no-store" });
+        const payload = await response.json();
+        if (!cancelled) setLiveSessions(payload.sessions || []);
+      } catch {
+        // keep the previous list
+      }
+    };
+    void load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [tab]);
+
+  const openSession = (sessionId) => {
+    const params = new URLSearchParams({ tab: "sessions", session: sessionId });
+    router.push(`/dashboard/usage?${params.toString()}`, { scroll: false });
+  };
+
   return (
     <Card className="flex min-w-0 flex-col overflow-hidden" padding="sm" style={{ height: 480 }}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-1 py-2 border-b border-border shrink-0">
-        <span className="text-xs font-semibold text-text-muted uppercase tracking-wide">Recent Requests</span>
-        <span className="text-[10px] text-text-subtle">click to inspect</span>
+      {/* Header with tabs: recent requests / live sessions */}
+      <div className="flex items-center justify-between gap-2 px-1 py-1.5 border-b border-border shrink-0">
+        <div className="flex items-center gap-1 rounded-lg border border-border bg-bg-subtle p-0.5">
+          {[
+            { value: "recent", label: "Recent" },
+            { value: "live", label: "Live sessions" },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => setTab(option.value)}
+              className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                tab === option.value ? "bg-surface text-text-main shadow-sm" : "text-text-muted hover:text-text"
+              }`}
+            >
+              {option.label}
+              {option.value === "live" && liveSessions.length > 0 ? (
+                <span className="ml-1 rounded-full bg-success/15 px-1 text-[9px] text-success">{liveSessions.length}</span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+        <span className="text-[10px] text-text-subtle">{tab === "live" ? "click to attach" : "click to inspect"}</span>
       </div>
 
-      {!requests.length ? (
+      {tab === "live" ? (
+        liveSessions.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-text-muted text-sm">No running sessions.</div>
+        ) : (
+          <div className="flex-1 overflow-y-auto">
+            <ul className="divide-y divide-border/50">
+              {liveSessions.map((session) => (
+                <li key={session.id}>
+                  <button
+                    type="button"
+                    onClick={() => openSession(session.id)}
+                    className="flex w-full flex-col gap-0.5 px-2 py-2 text-left transition-colors hover:bg-bg-subtle"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {session.generating ? (
+                        <span className="material-symbols-outlined animate-spin text-[12px] text-sky-500" title="generating now">progress_activity</span>
+                      ) : (
+                        <span className="block w-1.5 h-1.5 rounded-full bg-success" title="live" />
+                      )}
+                      <span className="truncate text-xs font-medium text-text-main">{session.label || session.id}</span>
+                    </span>
+                    <span className="flex items-center gap-2 text-[10px] text-text-muted">
+                      <span className="truncate">{session.model || "—"}</span>
+                      <span>{session.requests} req</span>
+                      <span>{fmt(session.tokens)} tok</span>
+                      <span className="ml-auto">{session.generating ? "generating…" : "idle"}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
+      ) : !requests.length ? (
         <div className="flex-1 flex items-center justify-center text-text-muted text-sm">No requests yet.</div>
       ) : (
         <div className="flex-1 overflow-y-auto">
