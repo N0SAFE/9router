@@ -55,8 +55,48 @@ export function createSSEStream(options = {}) {
     body = null,
     onStreamComplete = null,
     apiKey = null,
-    credentials = null
+    credentials = null,
+    onDelta = null
   } = options;
+
+  // Stream message text (and partial tool calls) as it is generated (live chat
+  // view). Best-effort: it must never break the client stream.
+  const emitDelta = (text, thinking, toolCalls = null) => {
+    if (!onDelta || (!text && !thinking && !(toolCalls && toolCalls.length))) return;
+    try {
+      onDelta({ text: text || "", thinking: thinking || "", toolCalls });
+    } catch {
+      // live content must never break streaming
+    }
+  };
+
+  const toolCallDeltas = (delta) => {
+    if (!Array.isArray(delta?.tool_calls) || delta.tool_calls.length === 0) return null;
+    return delta.tool_calls.map((call) => ({
+      index: call?.index ?? 0,
+      name: call?.function?.name || null,
+      arguments: call?.function?.arguments || "",
+    }));
+  };
+
+  // Tool calls arrive in fragments; merge them for the persisted detail.
+  const accumulatedToolCalls = [];
+  const accumulateToolCalls = (deltas) => {
+    for (const call of deltas) {
+      const index = call?.index ?? accumulatedToolCalls.length;
+      const existing = accumulatedToolCalls[index] || { name: null, arguments: "" };
+      accumulatedToolCalls[index] = {
+        name: call?.name || existing.name || null,
+        arguments: `${existing.arguments || ""}${call?.arguments || ""}`,
+      };
+    }
+  };
+  const handleToolCalls = (delta) => {
+    const deltas = toolCallDeltas(delta);
+    if (!deltas) return;
+    accumulateToolCalls(deltas);
+    emitDelta(null, null, deltas);
+  };
 
   let buffer = "";
   let usage = null;
@@ -114,7 +154,8 @@ export function createSSEStream(options = {}) {
     if (onStreamComplete) {
       onStreamComplete({
         content: accumulatedContent,
-        thinking: accumulatedThinking
+        thinking: accumulatedThinking,
+        toolCalls: accumulatedToolCalls.filter((call) => call?.name || call?.arguments)
       }, finalUsage, ttftAt);
     }
   };
@@ -215,11 +256,14 @@ export function createSSEStream(options = {}) {
               if (content && typeof content === "string") {
                 totalContentLength += content.length;
                 accumulatedContent += content;
+                emitDelta(content, null);
               }
               if (reasoning && typeof reasoning === "string") {
                 totalContentLength += reasoning.length;
                 accumulatedThinking += reasoning;
+                emitDelta(null, reasoning);
               }
+              handleToolCalls(delta);
 
               const extracted = extractUsage(parsed);
               if (extracted) {
@@ -318,22 +362,27 @@ export function createSSEStream(options = {}) {
         if (parsed.delta?.text) {
           totalContentLength += parsed.delta.text.length;
           accumulatedContent += parsed.delta.text;
+          emitDelta(parsed.delta.text, null);
         }
         // Claude format - thinking
         if (parsed.delta?.thinking) {
           totalContentLength += parsed.delta.thinking.length;
           accumulatedThinking += parsed.delta.thinking;
+          emitDelta(null, parsed.delta.thinking);
         }
         
         // OpenAI format - content
         if (parsed.choices?.[0]?.delta?.content) {
           totalContentLength += parsed.choices[0].delta.content.length;
           accumulatedContent += parsed.choices[0].delta.content;
+          emitDelta(parsed.choices[0].delta.content, null);
         }
+        handleToolCalls(parsed.choices?.[0]?.delta);
         // OpenAI format - reasoning
         if (parsed.choices?.[0]?.delta?.reasoning_content) {
           totalContentLength += parsed.choices[0].delta.reasoning_content.length;
           accumulatedThinking += parsed.choices[0].delta.reasoning_content;
+          emitDelta(null, parsed.choices[0].delta.reasoning_content);
         }
         
         // Gemini format
@@ -344,8 +393,10 @@ export function createSSEStream(options = {}) {
               // Check if this is thinking content
               if (part.thought === true) {
                 accumulatedThinking += part.text;
+                emitDelta(null, part.text);
               } else {
                 accumulatedContent += part.text;
+                emitDelta(part.text, null);
               }
             }
           }
@@ -535,7 +586,7 @@ export function createSSEStream(options = {}) {
   });
 }
 
-export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, customToolNames = null, credentials = null) {
+export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, customToolNames = null, credentials = null, onDelta = null) {
   return createSSEStream({
     mode: STREAM_MODE.TRANSLATE,
     targetFormat,
@@ -553,7 +604,7 @@ export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, p
   });
 }
 
-export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null) {
+export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, onDelta = null) {
   return createSSEStream({
     mode: STREAM_MODE.PASSTHROUGH,
     provider,
@@ -562,6 +613,7 @@ export function createPassthroughStreamWithLogger(provider = null, reqLogger = n
     connectionId,
     body,
     onStreamComplete,
-    apiKey
+    apiKey,
+    onDelta
   });
 }

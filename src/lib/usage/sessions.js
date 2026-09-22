@@ -214,7 +214,16 @@ export function buildSessionTurns(details = []) {
       ? details[index + 1].request.messages
       : [];
     const assistantIndex = nextMessages.findIndex((message) => message?.role === "assistant" && Array.isArray(message.tool_calls));
-    const toolCalls = assistantIndex >= 0 ? toolCallsFrom([nextMessages[assistantIndex]]) : [];
+    // Prefer the tool calls recorded with the response; the next-request
+    // heuristic misses the last turn of a session.
+    const recordedToolCalls = Array.isArray(detail?.response?.toolCalls)
+      ? detail.response.toolCalls.filter((call) => call && (call.name || call.arguments))
+      : [];
+    const toolCalls = recordedToolCalls.length > 0
+      ? recordedToolCalls.map((call) => ({ name: call.name || "tool", arguments: call.arguments || null }))
+      : assistantIndex >= 0
+        ? toolCallsFrom([nextMessages[assistantIndex]])
+        : [];
 
     const response = detail?.response || {};
     let inputSpeed = null;
@@ -321,6 +330,20 @@ function firstUserMessage(detail) {
 }
 
 const LABEL_NOISE = [/^<environment_info>/i, /^<system/i, /^<[a-z_]+>[\s\S]*<\/[a-z_]+>$/i];
+const NOISE_BLOCK = /<([a-z_]+)>[\s\S]*?<\/\1>/gi;
+
+/**
+ * First-line label for a session: strips leading context blocks
+ * (environment/workspace info) and rejects messages that are pure noise.
+ */
+export function sanitizeLabel(text, fallback = null) {
+  const value = String(text || "").trim();
+  if (!value) return fallback;
+  const stripped = value.replace(NOISE_BLOCK, " ").replace(/\s+/g, " ").trim();
+  const candidate = stripped.length >= 8 ? stripped : value;
+  if (LABEL_NOISE.some((pattern) => pattern.test(candidate))) return fallback;
+  return candidate.slice(0, 96);
+}
 
 /** First meaningful user message across the session, with a model fallback. */
 function pickLabel(details) {
@@ -329,8 +352,9 @@ function pickLabel(details) {
     for (const message of messages) {
       if (message?.role !== "user") continue;
       const text = messageText(message).trim();
-      if (!text || LABEL_NOISE.some((pattern) => pattern.test(text))) continue;
-      return text.slice(0, 96);
+      const label = sanitizeLabel(text);
+      if (!label) continue;
+      return label;
     }
   }
   const first = details[0];

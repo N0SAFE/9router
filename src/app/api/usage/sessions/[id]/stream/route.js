@@ -38,7 +38,7 @@ export async function GET(request, { params }) {
 
       const snapshot = async () => {
         try {
-          return await buildSessionPayload(sessionId);
+          return await buildSessionPayload(sessionId, { includeContent: false });
         } catch (error) {
           return { id: sessionId, error: String(error?.message || error) };
         }

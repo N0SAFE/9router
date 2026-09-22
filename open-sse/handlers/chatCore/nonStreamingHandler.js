@@ -234,7 +234,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 /**
  * Handle non-streaming response from provider.
  */
-export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, routing, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log }) {
+export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, routing, apiKey, liveRequestId = null, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log }) {
   trackDone();
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
@@ -328,6 +328,20 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
 
   reqLogger.logConvertedResponse(translatedResponse);
 
+  // Live chat view: non-streaming requests deliver their text in one piece.
+  if (liveRequestId) {
+    try {
+      const liveText = translatedResponse?.choices?.[0]?.message?.content
+        || translatedResponse?.content
+        || responseBody?.choices?.[0]?.message?.content
+        || "";
+      if (liveText) pushContentDelta(liveRequestId, { text: liveText });
+      finishContentTurn(liveRequestId, { status: "completed" });
+    } catch {
+      // best effort
+    }
+  }
+
   const totalLatency = Date.now() - requestStartTime;
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
@@ -339,7 +353,11 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     response: {
       content: translatedResponse?.choices?.[0]?.message?.content || translatedResponse?.content || null,
       thinking: translatedResponse?.choices?.[0]?.message?.reasoning_content || translatedResponse?.reasoning_content || null,
-      finish_reason: translatedResponse?.choices?.[0]?.finish_reason || "unknown"
+      finish_reason: translatedResponse?.choices?.[0]?.finish_reason || "unknown",
+      toolCalls: (translatedResponse?.choices?.[0]?.message?.tool_calls || []).map((call) => ({
+        name: call?.function?.name || null,
+        arguments: call?.function?.arguments || ""
+      }))
     },
     pxpipe,
     routing,

@@ -15,8 +15,10 @@ import {
   detectSpikes,
   groupImplicitSessions,
   liveKeyForDetail,
+  sanitizeLabel,
   summarizeSession,
 } from "./sessions.js";
+import { summarizeRouting } from "./routingEvents.js";
 import { getSessionMonitor } from "./sessionMonitors.js";
 import { findGeneratingSession } from "./liveSessions.js";
 
@@ -54,6 +56,7 @@ function stripContent(turns) {
 }
 
 export async function buildSessionPayload(sessionId, options = {}) {
+  const { includeContent = true } = options;
   const { details, kind, liveKey } = await loadSessionDetails(sessionId);
   const generatingEntry = findGeneratingSession({
     sessionId: kind === "explicit" ? sessionId : null,
@@ -87,6 +90,7 @@ export async function buildSessionPayload(sessionId, options = {}) {
           kinds: [],
         },
         turns: [],
+        routing: null,
         spikes: { flagged: [], costMedian: 0, tokenMedian: 0 },
         monitor,
         budget: null,
@@ -94,7 +98,7 @@ export async function buildSessionPayload(sessionId, options = {}) {
         generatedAt: new Date().toISOString(),
       };
     }
-    return { id: sessionId, kind, liveKey, missing: true, summary: null, turns: [], spikes: { flagged: [] } };
+    return { id: sessionId, kind, liveKey, missing: true, summary: null, turns: [], routing: null, spikes: { flagged: [] } };
   }
 
   const [settings, connections] = await Promise.all([
@@ -110,7 +114,9 @@ export async function buildSessionPayload(sessionId, options = {}) {
 
   const contentMode = settings?.observabilityContentMode === "none" ? "none" : "full";
   let turns = buildSessionTurns(details);
-  if (contentMode === "none") turns = stripContent(turns);
+  // The analytics stream carries numbers only; message text travels on the
+  // content stream so the chat view can render it live.
+  if (contentMode === "none" || includeContent === false) turns = stripContent(turns);
 
   turns = turns.map((turn) => ({
     ...turn,
@@ -140,6 +146,7 @@ export async function buildSessionPayload(sessionId, options = {}) {
     missing: false,
     summary,
     turns,
+    routing: summarizeRouting(turns),
     spikes,
     monitor,
     budget,
@@ -199,7 +206,7 @@ export async function listExplicitSessions(limit = 200) {
           : Array.isArray(user?.content)
             ? user.content.map((part) => part?.text || "").join(" ")
             : "";
-        if (text) labels[row.sessionId] = text.slice(0, 96);
+        if (text) labels[row.sessionId] = sanitizeLabel(text) || text.slice(0, 96);
       } catch {
         // ignore malformed rows
       }

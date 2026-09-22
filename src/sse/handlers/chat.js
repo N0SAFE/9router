@@ -58,7 +58,8 @@ import { beginKeyRequest, endKeyRequest } from "@/lib/keys/concurrency.js";
 import { isConnectionAllowed } from "@/lib/keys/policy.js";
 import { registerSessionStart } from "@/lib/usage/liveSessions.js";
 import { finishLiveRequest, pushRoutingEvent, startLiveRequest } from "@/lib/usage/liveRouting.js";
-import { liveKeyForRequest } from "@/lib/usage/sessions.js";
+import { finishContentTurn, startLiveTurn } from "@/lib/usage/liveContent.js";
+import { liveKeyForRequest, sanitizeLabel } from "@/lib/usage/sessions.js";
 
 /**
  * Handle chat completion request
@@ -198,7 +199,7 @@ export async function handleChat(request, clientRawRequest = null) {
       liveKey,
       provider: slash > 0 ? modelStr.slice(0, slash) : null,
       model: slash > 0 ? modelStr.slice(slash + 1) : modelStr,
-      label: firstText.slice(0, 96) || null,
+      label: sanitizeLabel(firstText),
       apiKey,
     });
     liveRequestId = globalThis.crypto?.randomUUID?.() || `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -210,7 +211,21 @@ export async function handleChat(request, clientRawRequest = null) {
       provider: slash > 0 ? modelStr.slice(0, slash) : null,
       model: slash > 0 ? modelStr.slice(slash + 1) : modelStr,
       apiKey,
-      label: firstText.slice(0, 96) || null,
+      label: sanitizeLabel(firstText),
+    });
+    const lastUser = [...messages].reverse().find((message) => message?.role === "user");
+    const lastUserText = typeof lastUser?.content === "string"
+      ? lastUser.content
+      : Array.isArray(lastUser?.content)
+        ? lastUser.content.map((part) => part?.text || "").join(" ")
+        : "";
+    startLiveTurn({
+      requestId: liveRequestId,
+      sessionId: explicitSessionId,
+      liveKey,
+      provider: slash > 0 ? modelStr.slice(0, slash) : null,
+      model: slash > 0 ? modelStr.slice(slash + 1) : modelStr,
+      userText: lastUserText || null,
     });
   } catch {
     // the live registry is best-effort and must never break routing
@@ -237,7 +252,7 @@ export async function handleChat(request, clientRawRequest = null) {
     ensureCombo(trace, { name: modelStr, strategy: comboStrategy, adapterAdded, kind: trace.combo?.kind || null });
     const runComboModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
-      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
+      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy, null, liveRequestId);
       recordComboModel(trace, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
       return res;
     };
@@ -287,7 +302,7 @@ export async function handleChat(request, clientRawRequest = null) {
     ensureCombo(trace, { name: modelStr, strategy: comboStrategy, adapterAdded, kind: "capacity" });
     const runAdapterModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
-      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
+      const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy, null, liveRequestId);
       recordComboModel(trace, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
       return res;
     };
@@ -303,13 +318,13 @@ export async function handleChat(request, clientRawRequest = null) {
 
   const soloTrace = createRoutingTrace({ requestedModel: modelStr });
   soloTrace.liveId = liveRequestId;
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, soloTrace, policy, contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, soloTrace, policy, contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null, liveRequestId);
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, trace = null, policy = null, requestedModel = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, trace = null, policy = null, requestedModel = null, liveRequestId = null) {
   const routing = trace || createRoutingTrace({ requestedModel: modelStr });
   const modelInfo = await getModelInfo(modelStr);
 
@@ -337,7 +352,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       ensureCombo(routing, { name: modelStr, strategy: comboStrategy, adapterAdded, kind: "combo" });
       const runComboModel = async (b, m) => {
         recordComboModel(routing, m, { status: "pending" });
-        const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, routing, policy);
+        const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, routing, policy, null, liveRequestId);
         recordComboModel(routing, m, { status: res?.ok ? "success" : `failed:${res?.status ?? "?"}` });
         return res;
       };
@@ -390,7 +405,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const target = resolveDowngradeTarget(policy, `${provider}/${model}`);
       if (target && target !== `${provider}/${model}` && target !== modelStr) {
         log.warn("POLICY", `downgrading ${provider}/${model} → ${target} (${accessViolations[0].message})`);
-        return handleSingleModelChat(body, target, clientRawRequest, request, apiKey, trace, policy);
+        return handleSingleModelChat(body, target, clientRawRequest, request, apiKey, trace, policy, null, liveRequestId);
       }
       log.warn("POLICY", `blocked ${provider}/${model}: ${accessViolations[0].message}`);
       return policyErrorResponse(403, accessViolations[0].message, accessViolations);
@@ -495,6 +510,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       routing,
       userAgent,
       apiKey,
+      liveRequestId,
       ccFilterNaming: !!chatSettings.ccFilterNaming,
       rtkEnabled: !!chatSettings.rtkEnabled,
       headroomEnabled: !!chatSettings.headroomEnabled,
@@ -550,6 +566,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         model,
         connectionId: credentials.connectionId,
       });
+      // Content keeps streaming after routing is done; the detail write finishes it.
       return result.response;
     }
 
@@ -569,6 +586,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         type: "fallback",
         message: `rotating after ${result.status ?? "error"} (${poolError.action})`,
       });
+    } else {
+      finishContentTurn(liveRequestId, { status: "error", error: result.error || result.status || "request failed" });
     }
 
     if (poolError.action === POOL_ACTIONS.NON_FALLBACK) {

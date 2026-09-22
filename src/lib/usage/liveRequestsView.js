@@ -5,73 +5,10 @@
 
 import { getRecentDetailRows } from "@/lib/db/index.js";
 import { extractMessageText } from "@/lib/keys/policy.js";
+import { detectContextProblem, eventsFromTrace, isSuccessStatus } from "./routingEvents.js";
 import { listLiveRequests } from "./liveRouting.js";
 
 const PERSISTED_WINDOW_MS = 30 * 60 * 1000;
-const CONTEXT_PATTERNS = [
-  /context[ _-]?length/i,
-  /maximum context/i,
-  /context window/i,
-  /too many tokens/i,
-  /token limit/i,
-  /prompt is too long/i,
-  /input length/i,
-  /reduce the length/i,
-];
-
-function isSuccessStatus(status) {
-  return !status || status === "ok" || status === "success";
-}
-
-export function detectContextProblem(text) {
-  return CONTEXT_PATTERNS.some((pattern) => pattern.test(String(text || "")));
-}
-
-/** Turn a persisted routing trace back into event rows for the trace view. */
-export function eventsFromTrace(detail) {
-  const trace = detail?.routing || {};
-  const events = [];
-  if (trace.combo) {
-    events.push({ type: "combo", message: `combo “${trace.combo.name}” (${trace.combo.strategy || "fallback"})` });
-    for (const model of trace.combo.models || []) {
-      events.push({
-        type: "combo-model",
-        model: model.model,
-        status: model.status,
-        error: model.error || null,
-        message: `${model.model} · ${model.status}${model.error ? ` — ${model.error}` : ""}`,
-      });
-    }
-  }
-  if (trace.provider || trace.model) {
-    events.push({ type: "model", message: `model ${trace.provider || "?"}/${trace.model || "?"}` });
-  }
-  if (trace.pool) {
-    events.push({
-      type: "pool",
-      message: `pool ${trace.pool.provider || "?"} · ${trace.pool.strategy || "default"}${trace.pool.total != null ? ` · ${trace.pool.available ?? "?"}/${trace.pool.total} available` : ""}`,
-    });
-  }
-  if (trace.selected) {
-    events.push({ type: "account", message: `account ${trace.selected.name || trace.selected.connectionId || "?"}` });
-  }
-  for (const attempt of trace.attempts || []) {
-    events.push({
-      type: "attempt",
-      status: attempt.status,
-      error: attempt.error || null,
-      action: attempt.action || null,
-      message: `attempt ${attempt.name || attempt.connectionId || "?"} · ${attempt.status ?? "?"}${attempt.error ? ` — ${attempt.error}` : ""}${attempt.action ? ` → ${attempt.action}` : ""}`,
-    });
-  }
-  if (isSuccessStatus(detail?.status)) {
-    events.push({ type: "complete", message: "completed" });
-  } else {
-    events.push({ type: "error", message: String(detail?.status || "error") });
-  }
-  return events;
-}
-
 export async function buildLiveRequestsPayload() {
   const live = listLiveRequests().map((entry) => ({ ...entry, persisted: false }));
   const liveIds = new Set(live.map((entry) => entry.id));

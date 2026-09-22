@@ -1,6 +1,7 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { EventEmitter } from "events";
+import { liveKeyForDetail } from "@/lib/usage/sessions.js";
 
 // Live session monitoring: listeners (SSE routes) get told when a detail lands.
 if (!global._detailsEmitter) {
@@ -140,7 +141,17 @@ async function flushToDatabase() {
             `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, sessionId, data) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET timestamp = excluded.timestamp, provider = excluded.provider, model = excluded.model, connectionId = excluded.connectionId, status = excluded.status, sessionId = excluded.sessionId, data = excluded.data`,
             [record.id, record.timestamp, record.provider, record.model, record.connectionId, record.status, record.sessionId, stringifyJson(record)]
           );
-          saved.push({ id: record.id, sessionId: record.sessionId, provider: record.provider, model: record.model, timestamp: record.timestamp });
+          saved.push({
+            id: record.id,
+            sessionId: record.sessionId,
+            liveKey: liveKeyForDetail(record),
+            provider: record.provider,
+            model: record.model,
+            timestamp: record.timestamp,
+            // Placeholder rows are written when a stream starts; the final row
+            // (same id, upserted) carries the real content.
+            streaming: item.response?.type === "streaming",
+          });
         }
 
         const cnt = db.get(`SELECT COUNT(*) as c FROM requestDetails`);
