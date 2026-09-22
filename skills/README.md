@@ -18,6 +18,12 @@ Drop-in skills for any AI agent (Claude, Cursor, ChatGPT, custom SDK). Just **co
 | Web search | https://raw.githubusercontent.com/decolua/9router/refs/heads/master/skills/9router-web-search/SKILL.md |
 | Web fetch (URL → markdown) | https://raw.githubusercontent.com/decolua/9router/refs/heads/master/skills/9router-web-fetch/SKILL.md |
 
+### Maintainer skill (this fork)
+
+| Capability | Copy link below and paste to your AI |
+|---|---|
+| **Fork upgrade** (rebase onto upstream, regression gate, stack rebuild) | https://raw.githubusercontent.com/N0SAFE/9router/refs/heads/master/skills/9router-upgrade/SKILL.md |
+
 ## How to use
 
 Paste to your AI (Claude, Cursor, ChatGPT, …):

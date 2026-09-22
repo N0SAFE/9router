@@ -89,7 +89,9 @@ graphify-out/*
 
 # Kiro local workspace state
 .kiro/
-9router-*
+# Root-anchored: local workspace dirs / packed tarballs at the repo root.
+# (Unanchored, this also swallowed skills/9router-*/ and hid new skills from git.)
+/9router-*
 
 # Local sensitive / temp files
 .engine-token.txt
