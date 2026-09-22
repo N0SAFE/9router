@@ -5,5 +5,6 @@ export {
   getUsagePerformanceRows,
   appendRequestLog, getRecentLogs,
   saveRequestDetail, getRequestDetails, getRequestDetailById, getRequestDetailsInRange,
+  getDetailsBySession, getRecentDetailRows, detailsEmitter,
   getLastRequestDetail, getRequestDetailByClientRequestId,
 } from "@/lib/db/index.js";

@@ -20,10 +20,14 @@ export async function register() {
     // Remote workspace tunnel: restart it after a service restart when it was
     // started from the dashboard (systemd kills the service cgroup processes).
     try {
-      const { backfillUsageLatency } = await import("@/lib/db/backfillLatency.js");
+      const { backfillUsageLatency, backfillSessionIds } = await import("@/lib/db/backfillLatency.js");
       const result = await backfillUsageLatency();
       if (result.updated) {
         console.log(`[Usage] latency backfill: ${result.updated} row(s) updated`);
+      }
+      const sessions = await backfillSessionIds();
+      if (sessions.updated) {
+        console.log(`[Usage] session id backfill: ${sessions.updated} row(s) updated`);
       }
     } catch {
       // best effort
