@@ -10,7 +10,7 @@ import os from "os";
 
 const execAsync = promisify(exec);
 
-const getConfigDir = () => path.join(os.homedir(), ".config", "opencode");
+const getConfigDir = () => process.env.OPENCODE_CONFIG_DIR || path.join(os.homedir(), ".config", "opencode");
 const getConfigPath = () => path.join(getConfigDir(), "opencode.json");
 
 // Check if opencode CLI is installed (via which/where or config file exists)

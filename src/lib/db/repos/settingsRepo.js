@@ -65,6 +65,9 @@ const DEFAULT_SETTINGS = {
   cavemanLevel: "full",
   ponytailEnabled: false,
   ponytailLevel: "full",
+  // Model (or combo) the local upgrade agent runs with:
+  // `opencode run --model 9router/<upgradeModel>`.
+  upgradeModel: "",
   pxpipeEnabled: false,
   pxpipeAutoInstall: true,
   pxpipeMinChars: 25000,

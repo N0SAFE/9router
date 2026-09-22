@@ -87,6 +87,9 @@ const LOCAL_ONLY_PATHS = [
   "/api/headroom/start",
   "/api/headroom/stop",
   "/api/headroom/proxy",
+  // Local upgrade agent (opencode) - starts a process that writes to the fork checkout.
+  "/api/upgrade/start",
+  "/api/upgrade/stop",
 ];
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
