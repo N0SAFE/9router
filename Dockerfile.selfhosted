@@ -1,0 +1,124 @@
+# syntax=docker/dockerfile:1.7
+#
+# Self-hosted 9Router image — built by docker-compose.yml.
+#
+# Differences from ./Dockerfile (the published multi-arch image):
+#   * Debian (bookworm-slim) instead of Alpine: headroom-ai and its
+#     dependencies (torch, tree-sitter, ast-grep) only ship manylinux wheels.
+#   * The managed Headroom proxy is baked into this image, in its own venv at
+#     /opt/headroom, so token saving runs entirely inside the container and
+#     never touches the host's Python installation.
+#   * Same Next.js build steps and same runtime layout (DATA_DIR=/app/data) as
+#     the published image, so both are drop-in compatible.
+#
+# Build args:
+#   NPM_REGISTRY     override the npm registry for restricted networks
+#   APP_VERSION      OCI version label
+#   HEADROOM_EXTRAS  `proxy,code,ml` (default: full compression pipeline) or
+#                    `proxy,code` to skip the multi-hundred-MB torch stack.
+#   TORCH_INDEX_URL  CPU torch wheel index used when `ml` is enabled.
+ARG NODE_IMAGE=node:22-bookworm-slim
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+ARG APP_VERSION=unknown
+ARG HEADROOM_EXTRAS=proxy,code,ml
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+
+FROM ${NODE_IMAGE} AS base
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates gosu \
+  && rm -rf /var/lib/apt/lists/*
+
+FROM base AS builder
+ARG NPM_REGISTRY
+
+# python3/make/g++ are needed by native addons (better-sqlite3, sharp).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY package.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm install \
+      --registry="${NPM_REGISTRY}" \
+      --fetch-retries=5 \
+      --fetch-retry-factor=2 \
+      --fetch-retry-mintimeout=10000 \
+      --fetch-retry-maxtimeout=120000 \
+      --fetch-timeout=300000
+
+COPY . ./
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+FROM base AS runner
+ARG APP_VERSION
+ARG HEADROOM_EXTRAS
+ARG TORCH_INDEX_URL
+
+LABEL org.opencontainers.image.title="9router" \
+      org.opencontainers.image.version="${APP_VERSION}"
+
+ENV NODE_ENV=production \
+    PORT=20128 \
+    HOSTNAME=0.0.0.0 \
+    NEXT_TELEMETRY_DISABLED=1 \
+    DATA_DIR=/app/data
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 python3-venv \
+  && rm -rf /var/lib/apt/lists/*
+
+# Headroom lives in a dedicated venv (never the system Python). The dashboard
+# discovers it with `which headroom`, probes the interpreter sitting next to
+# that binary, and can install/remove the `code`/`ml` extras from the UI — the
+# venv is chowned to `node` so those installs work without root.
+# `ml` pulls Kompress (transformers), whose torch wheel comes from the CPU
+# index: a routing container has no GPU and must not ship ~3 GB of CUDA libs.
+RUN python3 -m venv /opt/headroom \
+  && /opt/headroom/bin/pip install --no-cache-dir --upgrade pip \
+  && case ",${HEADROOM_EXTRAS}," in \
+       *,ml,*) /opt/headroom/bin/pip install --no-cache-dir \
+                 --index-url "${TORCH_INDEX_URL}" torch ;; \
+     esac \
+  && /opt/headroom/bin/pip install --no-cache-dir "headroom-ai[${HEADROOM_EXTRAS}]" \
+  && chown -R node:node /opt/headroom
+
+ENV PATH="/opt/headroom/bin:${PATH}"
+
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/custom-server.js ./custom-server.js
+COPY --from=builder /app/open-sse ./open-sse
+# Next file tracing can omit sibling files; MITM runs server.js as a separate process.
+COPY --from=builder /app/src/mitm ./src/mitm
+# Standalone node_modules may omit deps only required by the MITM child process.
+COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
+# Ensure `next` is available at runtime in case tracing did not include it.
+COPY --from=builder /app/node_modules/next ./node_modules/next
+# sql.js loads dist/sql-wasm.wasm by path at runtime; tracing only follows JS imports,
+# so the last-resort DB driver would abort with ENOENT on the missing binary.
+COPY --from=builder /app/node_modules/sql.js ./node_modules/sql.js
+# node-machine-id is createRequire-loaded at runtime; tracing omits it.
+COPY --from=builder /app/node_modules/node-machine-id ./node_modules/node-machine-id
+# Native SQLite driver preferred by src/lib/db/driver.js when present; without it
+# the app silently downgrades to node:sqlite/sql.js.
+COPY --from=builder /app/node_modules/better-sqlite3 ./node_modules/better-sqlite3
+COPY --from=builder /app/node_modules/bindings ./node_modules/bindings
+COPY --from=builder /app/node_modules/file-uri-to-path ./node_modules/file-uri-to-path
+
+RUN mkdir -p /app/data && chown -R node:node /app && \
+  mkdir -p /app/data-home && chown node:node /app/data-home && \
+  ln -sf /app/data-home /root/.9router 2>/dev/null || true
+
+# Data volume is owned by the unprivileged `node` user; the entrypoint re-asserts
+# ownership because a bind mount / fresh volume arrives owned by root.
+RUN printf '#!/bin/sh\nset -e\nmkdir -p /app/data /app/data-home\nchown -R node:node /app/data /app/data-home 2>/dev/null || true\nexec gosu node "$@"\n' > /entrypoint.sh \
+  && chmod +x /entrypoint.sh
+
+EXPOSE 20128
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["node", "custom-server.js"]

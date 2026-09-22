@@ -9,10 +9,16 @@
 # Dependencies and build output
 node_modules
 .next
+.next-cli-build
+.next-analyze
 out
 build
 dist
 coverage
+
+# Local packaging artifacts
+cli/.build-home
+9router-*.tgz
 
 # Runtime data and logs
 data

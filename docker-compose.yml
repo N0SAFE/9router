@@ -1,30 +1,78 @@
+# 9Router — self-hosted Docker Compose stack
+#
+#   docker-prod compose up --build -d     # docker-prod = docker -H unix:///var/run/docker-prod.sock
+#   docker-prod compose logs -f router
+#   docker-prod compose down              # keeps the 9router-data volume
+#
+# Compose only runs the stack. It never reads the host's ~/.9router: the data
+# volume `9router-data` is an external volume that was imported once, by hand,
+# before the first start (see DOCKER.md → "One-time data import").
+#
+# Why host networking: the container must reach the host's local model servers
+# (ollama serve on 127.0.0.1:11434, llama-server, …) with their existing
+# connection URLs unchanged, and its managed Headroom proxy must be reachable at
+# 127.0.0.1:8787 exactly like the local variant. That means the container binds
+# the host's own ports (20128 dashboard/API, 8787 headroom) — a `ports:` mapping
+# would be ignored, so don't add one.
+name: 9router
+
 services:
-  9router:
-    image: decolua/9router:latest
+  router:
+    build:
+      context: .
+      dockerfile: Dockerfile.selfhosted
+      args:
+        # Keep in sync with package.json; used for the OCI version label only.
+        APP_VERSION: "0.5.85"
+        # proxy,code,ml = full compression pipeline (AST + Kompress), matching
+        # the host install. Use `HEADROOM_EXTRAS=proxy,code` to skip torch.
+        HEADROOM_EXTRAS: ${HEADROOM_EXTRAS:-proxy,code,ml}
+    image: 9router:selfhosted
     container_name: 9router
     restart: always
-    ports:
-      - "20128:20128"
-    volumes:
-      - 9router-data:/app/data
+    init: true
+    stop_grace_period: 30s
+    network_mode: host
     env_file:
-      - .env
+      # Optional: copy .env.example to .env to override defaults.
+      - path: .env
+        required: false
     environment:
       DATA_DIR: /app/data
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
-      HEADROOM_URL: http://headroom:8787
-    depends_on:
-      - headroom
-
-  headroom:
-    image: ghcr.io/chopratejas/headroom:latest
-    container_name: headroom
-    restart: always
-    ports:
-      - "8787:8787"
+      # Managed Headroom proxy runs inside this container (loopback).
+      HEADROOM_URL: http://127.0.0.1:8787
+      BASE_URL: http://localhost:20128
+      NEXT_PUBLIC_BASE_URL: http://localhost:20128
+    volumes:
+      - 9router-data:/app/data
+      # Headroom's own home (savings history, ccr store, logs). Without this it
+      # lives in the container layer and resets on every recreate.
+      - 9router-home:/home/node/.headroom
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:20128/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   9router-data:
     name: 9router-data
+    # Pre-populated once from ~/.9router; compose must not create it empty.
+    external: true
+  9router-home:
+    name: 9router-home
+    # Pre-populated once from ~/.headroom (Headroom's own state); same reason.
+    external: true

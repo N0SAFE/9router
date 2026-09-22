@@ -2,6 +2,8 @@
 
 Run 9Router in a container. Published image: [`decolua/9router`](https://hub.docker.com/r/decolua/9router) — multi-platform `linux/amd64` + `linux/arm64`.
 
+For an all-in-one self-hosted deployment (router + bundled Headroom, built from this repo, on the production Docker daemon) jump to [Self-hosted all-in-one stack](#-self-hosted-all-in-one-stack-docker-composeyml).
+
 ---
 
 # 👤 For Users
@@ -66,6 +68,8 @@ docker run -d \
 
 ## Optional Headroom sidecar
 
+> The [self-hosted all-in-one stack](#-self-hosted-all-in-one-stack-docker-composeyml) bundles Headroom inside the 9Router image, so you do not need a sidecar there. The instructions below are for the published image (`decolua/9router`), which ships without Python.
+
 The 9Router image does not bundle Python or Headroom. To use Headroom in Docker, run it as a separate service and point 9Router at that proxy:
 
 ```yaml
@@ -104,6 +108,109 @@ To pin a specific version instead of following `latest`, use a numbered image ta
 
 ```bash
 docker pull decolua/9router:0.5.81
+```
+
+---
+
+# 🏠 Self-hosted all-in-one stack (`docker-compose.yml`)
+
+`docker-compose.yml` + `Dockerfile.selfhosted` run the router **and its managed Headroom proxy** in one long-lived container on the production Docker daemon. Compose only *starts* the stack — it never reads `$HOME/.9router`; the data volume is imported by hand once, before the first start.
+
+```bash
+docker-prod compose up --build -d      # docker-prod = docker -H unix:///var/run/docker-prod.sock
+docker-prod compose logs -f router
+docker-prod compose down               # keeps the 9router-data volume
+```
+
+| | |
+|---|---|
+| **Container** | `9router` (`9router:selfhosted`), `restart: always`, `init: true`, 50 MB × 5 log rotation |
+| **Data** | external volumes `9router-data` → `/app/data` and `9router-home` → `/home/node/.headroom`, both pre-populated once (see below) |
+| **Headroom** | `headroom-ai` installed in the image (`/opt/headroom` venv), managed by 9Router on `127.0.0.1:8787` — nothing runs on the host Python |
+| **Network** | host networking, so `localhost:11434` (Ollama), llama.cpp connections and the loopback Headroom URL behave exactly like the local install |
+
+## One-time data import
+
+Run once, with the local app stopped, before the first `up`. This is a manual step: the stack itself never touches `$HOME/.9router` or `$HOME/.headroom`.
+
+```bash
+# app data: database, secrets, settings, model catalog
+docker-prod volume create 9router-data
+docker-prod run --rm \
+  -v 9router-data:/target \
+  -v "$HOME/.9router:/source:ro" \
+  alpine:3.20 sh -c '
+    cp -a /source/. /target/ &&
+    rm -rf /target/remote &&
+    rm -f /target/headroom/proxy.pid /target/local/*.json /target/local/*.log &&
+    chown -R 1000:1000 /target'
+
+# Headroom's own home: savings history, ccr store, logs
+docker-prod volume create 9router-home
+docker-prod run --rm \
+  -v 9router-home:/target \
+  -v "$HOME/.headroom:/source:ro" \
+  alpine:3.20 sh -c '
+    cp -a /source/. /target/ &&
+    rm -f /target/.beacon_lock_* &&
+    chown -R 1000:1000 /target'
+```
+
+`remote/` (VS Code agent-host/tunnel state) and the managed-process pid files are dropped on purpose — they describe host processes and would be meaningless inside the container. `9router-home` keeps the Token Saver dashboard numbers continuous across the switch.
+
+## Switching from the local variant
+
+The local app and the container bind the same ports and must not share a SQLite file, so:
+
+```bash
+# 1. stop the local app for good (systemd user unit with Restart=always)
+systemctl --user disable --now 9router
+pkill -f '[h]eadroom proxy' || true
+
+# 2. import the data once (see "One-time data import")
+
+# 3. start the stack
+docker-prod compose up --build -d
+docker-prod compose logs -f router
+```
+
+The dashboard is then at http://localhost:20128 with the same login, providers and settings as the local install. To go back to the local variant: `docker-prod compose down && systemctl --user enable --now 9router`.
+
+## Verifying
+
+```bash
+docker-prod compose ps                       # router running/healthy
+curl -s localhost:20128/api/health           # {"ok":true}
+docker-prod exec 9router headroom --version  # headroom inside the container
+```
+
+## Headroom extras and image size
+
+The image installs `headroom-ai[proxy,code,ml]` by default — AST compression (`code`) and Kompress (`ml`, CPU-only torch), matching a fully-featured host install. This makes the image a couple of GB; to skip the ML stage:
+
+```bash
+HEADROOM_EXTRAS=proxy,code docker-prod compose build router
+```
+
+Extras can also be toggled from the dashboard (`Endpoint → Token Saver → Headroom`): the venv ships pip and is owned by the container user, so in-app installs work. They are lost when the image is rebuilt.
+
+## What is *not* in the container
+
+| Feature | Why | Where it runs |
+|---|---|---|
+| Local model servers (`ollama serve`, `llama-server`) | a container cannot manage host processes | host — connections keep working thanks to host networking (`http://localhost:11434`) |
+| 9Remote / VS Code agent host + tunnel | needs the VS Code CLI and its tunnel sessions | host (`9router-host`, `9router-agent`) |
+| In-app updater (`/api/version/update`) | the app inside an image is not self-updating | rebuild: `docker-prod compose up --build -d` |
+
+## Starting over from the host
+
+The volumes are external, so replacing them is an explicit two-step:
+
+```bash
+docker-prod compose down
+docker-prod volume rm 9router-data 9router-home   # discards the container's state
+# then repeat "One-time data import" and bring the stack back up:
+docker-prod compose up -d
 ```
 
 ---
