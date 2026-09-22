@@ -292,3 +292,27 @@ GHCR publishing uses the workflow's `GITHUB_TOKEN` with package write permission
 The optional repository variables `ALPINE_MIRROR` and `NPM_REGISTRY` can override the default package mirrors used by the CI Docker build.
 
 Workflow: `.github/workflows/docker-publish.yml`
+
+## Self-hosted deployment on this machine (docker-prod)
+
+The app that serves the dashboard and API is the **docker-prod compose stack**,
+not the systemd tray service:
+
+- daemon: `docker -H unix:///var/run/docker-prod.sock`
+- project: `9router` — this directory's `docker-compose.yml`, service `router`
+- data: external volume `9router-data` mounted at `/app/data` (the SQLite DB lives there)
+
+Deploy a change:
+
+```bash
+docker -H unix:///var/run/docker-prod.sock compose up --build -d
+docker -H unix:///var/run/docker-prod.sock compose logs -f router
+```
+
+Notes:
+
+- The tray unit (`9router.service`, `cli.js --tray`) only shows the tray icon; it
+  does not serve HTTP while the container owns port 20128.
+- Copying a `9router-*.tgz` into `~/.bun/install/global/node_modules/9router`
+  does **not** update the running app — only the image build above does.
+- Rebuilds recreate the container; the data volume is preserved.
