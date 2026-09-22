@@ -183,6 +183,8 @@ describe("tool-result images reach Anthropic-compatible and Command Code upstrea
     expect(json).not.toContain("[image omitted]");
     expect(json).toContain(`"type":"image"`);
     expect(json).toContain(`data:image/png;base64,${PNG}`);
-    expect(json).toContain(`"mediaType":"image/png"`);
+    // CommandCode image blocks carry mimeType (see the translator's documented
+    // block shape); mediaType is the Kiro field name, not used here.
+    expect(json).toContain(`"mimeType":"image/png"`);
   });
 });
