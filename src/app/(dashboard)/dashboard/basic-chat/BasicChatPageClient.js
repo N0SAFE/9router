@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Button, Input } from "@/shared/components";
+import { Button, Input, Toggle } from "@/shared/components";
 import { chatRuntime } from "./chatRuntime";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
@@ -492,6 +492,35 @@ export default function BasicChatPageClient() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <label className="hidden items-center gap-1.5 sm:flex" title="Watch this session in Usage → Sessions (timeline + chat view, live)">
+              <Toggle
+                size="sm"
+                checked={activeSession?.monitored === true}
+                onChange={async (checked) => {
+                  if (!activeSession?.id) return;
+                  chatRuntime.setMonitored(activeSession.id, checked);
+                  try {
+                    if (checked) {
+                      const firstUser = messages.find((message) => message.role === "user");
+                      await fetch("/api/usage/sessions/monitor", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          sessionId: activeSession.id,
+                          label: (firstUser?.content || activeSession.title || "chat").slice(0, 96),
+                          pinned: true,
+                        }),
+                      });
+                    } else {
+                      await fetch(`/api/usage/sessions/monitor?sessionId=${encodeURIComponent(activeSession.id)}`, { method: "DELETE" });
+                    }
+                  } catch {
+                    // the runtime flag still reflects the user's intent
+                  }
+                }}
+              />
+              <span className="text-[11px] text-text-muted">Monitor</span>
+            </label>
             <Button size="sm" variant="secondary" icon="list" className="lg:hidden" onClick={() => setShowModels((value) => !value)}>
               Models
             </Button>

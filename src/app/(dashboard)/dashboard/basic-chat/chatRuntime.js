@@ -133,6 +133,11 @@ export const chatRuntime = {
     setState({ modelId });
   },
 
+  /** Mark a session as monitored (the Sessions tab watch list mirrors this). */
+  setMonitored(sessionId, monitored) {
+    updateSession(sessionId, { monitored: monitored === true });
+  },
+
   newSession() {
     const session = {
       id: createId(),
@@ -200,7 +205,7 @@ export const chatRuntime = {
           model: modelId,
           messages: history.map((message) => ({ role: message.role, content: message.content })),
           stream: true,
-          metadata: { clientRequestId: createId() },
+          metadata: { clientRequestId: createId(), sessionId: session.id, monitor: session.monitored === true },
         }),
       });
 

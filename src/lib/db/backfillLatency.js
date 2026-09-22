@@ -17,6 +17,7 @@ import { parseJson } from "./helpers/jsonCol.js";
 import { usageOverlapKey } from "../usage/mergeDetails.js";
 
 const META_KEY = "usageLatencyBackfillV1";
+const SESSION_META_KEY = "usageSessionIdBackfillV1";
 const MAX_ROWS = 10000;
 
 export async function backfillUsageLatency({ limit = MAX_ROWS } = {}) {
@@ -72,4 +73,45 @@ export async function backfillUsageLatency({ limit = MAX_ROWS } = {}) {
 
   await setMeta(META_KEY, "done");
   return { updated, candidates: rows.length, details: details.length };
+}
+
+/**
+ * One-time backfill of requestDetails.sessionId from stored payloads
+ * (metadata.sessionId / metadata.conversationId) so pre-existing sessions
+ * become addressable in the Sessions tab.
+ */
+export async function backfillSessionIds({ limit = 5000 } = {}) {
+  const db = await getAdapter();
+
+  let done = null;
+  try {
+    done = await getMeta(SESSION_META_KEY, null);
+  } catch {
+    done = null;
+  }
+  if (done === "done") {
+    return { skipped: true };
+  }
+
+  const rows = db.all(
+    `SELECT id, data FROM requestDetails WHERE sessionId IS NULL ORDER BY timestamp DESC LIMIT ?`,
+    [limit]
+  );
+
+  let updated = 0;
+  db.transaction(() => {
+    for (const row of rows) {
+      const detail = parseJson(row.data, null);
+      const sessionId =
+        (typeof detail?.request?.metadata?.sessionId === "string" && detail.request.metadata.sessionId.trim()) ||
+        (typeof detail?.request?.metadata?.conversationId === "string" && detail.request.metadata.conversationId.trim()) ||
+        null;
+      if (!sessionId) continue;
+      db.run(`UPDATE requestDetails SET sessionId = ? WHERE id = ?`, [sessionId, row.id]);
+      updated += 1;
+    }
+  });
+
+  await setMeta(SESSION_META_KEY, "done");
+  return { updated, candidates: rows.length };
 }

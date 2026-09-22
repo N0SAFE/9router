@@ -153,6 +153,7 @@ export const TABLES = {
       model: "TEXT",
       connectionId: "TEXT",
       status: "TEXT",
+      sessionId: "TEXT",
       data: "TEXT NOT NULL",
     },
     indexes: [
@@ -160,6 +161,7 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_rd_provider ON requestDetails(provider)",
       "CREATE INDEX IF NOT EXISTS idx_rd_model ON requestDetails(model)",
       "CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId)",
+      "CREATE INDEX IF NOT EXISTS idx_rd_session_ts ON requestDetails(sessionId, timestamp)",
     ],
   },
 };

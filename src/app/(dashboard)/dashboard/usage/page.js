@@ -6,6 +6,7 @@ import { RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/componen
 import UsageStats from "@/shared/components/UsageStats";
 import RequestDetailsTab from "./components/RequestDetailsTab";
 import PerformanceTab from "./components/PerformanceTab";
+import SessionsTab from "./components/SessionsTab";
 
 const PERIODS = [
   { value: "today", label: "Today" },
@@ -31,7 +32,7 @@ function UsageContent() {
   const [period, setPeriod] = useState("today");
 
   const tabFromUrl = searchParams.get("tab");
-  const activeTab = tabFromUrl && ["overview", "performance", "logs", "details"].includes(tabFromUrl)
+  const activeTab = tabFromUrl && ["overview", "performance", "sessions", "logs", "details"].includes(tabFromUrl)
     ? tabFromUrl
     : "overview";
 
@@ -50,6 +51,7 @@ function UsageContent() {
           options={[
             { value: "overview", label: "Overview" },
             { value: "performance", label: "Performance" },
+            { value: "sessions", label: "Sessions" },
             { value: "details", label: "Details" },
           ]}
           value={activeTab}
@@ -75,6 +77,11 @@ function UsageContent() {
       {activeTab === "performance" && (
         <Suspense fallback={<CardSkeleton />}>
           <PerformanceTab />
+        </Suspense>
+      )}
+      {activeTab === "sessions" && (
+        <Suspense fallback={<CardSkeleton />}>
+          <SessionsTab />
         </Suspense>
       )}
       {activeTab === "logs" && <RequestLogger />}

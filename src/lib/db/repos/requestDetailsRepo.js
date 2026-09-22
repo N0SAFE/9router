@@ -1,5 +1,13 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { EventEmitter } from "events";
+
+// Live session monitoring: listeners (SSE routes) get told when a detail lands.
+if (!global._detailsEmitter) {
+  global._detailsEmitter = new EventEmitter();
+  global._detailsEmitter.setMaxListeners(200);
+}
+export const detailsEmitter = global._detailsEmitter;
 
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
@@ -89,6 +97,7 @@ async function flushToDatabase() {
   if (isFlushing) return;
   if (writeBuffer.length === 0) return;
   isFlushing = true;
+  const saved = [];
   try {
     // Drain entire buffer (loop in case more pushed during await)
     while (writeBuffer.length > 0) {
@@ -102,6 +111,12 @@ async function flushToDatabase() {
           if (!item.timestamp) item.timestamp = new Date().toISOString();
           if (item.request?.headers) item.request.headers = sanitizeHeaders(item.request.headers);
 
+          const sessionId =
+            (typeof item.sessionId === "string" && item.sessionId.trim()) ||
+            (typeof item.request?.metadata?.sessionId === "string" && item.request.metadata.sessionId.trim()) ||
+            (typeof item.request?.metadata?.conversationId === "string" && item.request.metadata.conversationId.trim()) ||
+            null;
+
           const record = {
             id: item.id,
             provider: item.provider || null,
@@ -109,6 +124,7 @@ async function flushToDatabase() {
             connectionId: item.connectionId || null,
             timestamp: item.timestamp,
             status: item.status || null,
+            sessionId,
             latency: item.latency || {},
             tokens: item.tokens || {},
             request: truncateField(item.request, config.maxJsonSize),
@@ -121,9 +137,10 @@ async function flushToDatabase() {
           };
 
           db.run(
-            `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, data) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET timestamp = excluded.timestamp, provider = excluded.provider, model = excluded.model, connectionId = excluded.connectionId, status = excluded.status, data = excluded.data`,
-            [record.id, record.timestamp, record.provider, record.model, record.connectionId, record.status, stringifyJson(record)]
+            `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, sessionId, data) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET timestamp = excluded.timestamp, provider = excluded.provider, model = excluded.model, connectionId = excluded.connectionId, status = excluded.status, sessionId = excluded.sessionId, data = excluded.data`,
+            [record.id, record.timestamp, record.provider, record.model, record.connectionId, record.status, record.sessionId, stringifyJson(record)]
           );
+          saved.push({ id: record.id, sessionId: record.sessionId, provider: record.provider, model: record.model, timestamp: record.timestamp });
         }
 
         const cnt = db.get(`SELECT COUNT(*) as c FROM requestDetails`);
@@ -134,6 +151,15 @@ async function flushToDatabase() {
           );
         }
       });
+    }
+
+    // Notify live session streams after the rows are committed.
+    for (const entry of saved) {
+      try {
+        detailsEmitter.emit("detail", entry);
+      } catch {
+        // listener errors must never break detail writes
+      }
     }
   } catch (e) {
     console.error("[requestDetailsRepo] Batch write failed:", e);
@@ -220,6 +246,29 @@ export async function getDistinctProviders() {
   return rows.map((r) => r.provider);
 }
 
+/**
+ * All details for one explicit session id, oldest first (chat/timeline order).
+ */
+export async function getDetailsBySession(sessionId, limit = 500) {
+  if (!sessionId) return [];
+  const db = await getAdapter();
+  const capped = Math.max(1, Math.min(Number(limit) || 500, 2000));
+  const rows = db.all(
+    `SELECT data FROM requestDetails WHERE sessionId = ? ORDER BY timestamp ASC LIMIT ?`,
+    [sessionId, capped]
+  );
+  return rows.map((row) => parseJson(row.data, null)).filter(Boolean);
+}
+
+/** Recent detail rows (newest first), parsed — used for implicit session grouping. */
+export async function getRecentDetailRows(limit = 500) {
+  const db = await getAdapter();
+  const capped = Math.max(1, Math.min(Number(limit) || 500, 2000));
+  const rows = db.all(`SELECT data FROM requestDetails ORDER BY timestamp DESC LIMIT ?`, [capped]);
+  return rows.map((row) => parseJson(row.data, null)).filter(Boolean);
+}
+
+/** One detail row by id (already exposed through usageDb, kept here for symmetry). */
 export async function getRequestDetailById(id) {
   const db = await getAdapter();
   const row = db.get(`SELECT data FROM requestDetails WHERE id = ?`, [id]);
