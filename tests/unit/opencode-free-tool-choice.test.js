@@ -18,6 +18,18 @@ const TOOLS = [{ type: "function", name: "get_weather", description: "w", parame
 // read/shell definitions are appended or upstream answers 403 FreeTierError.
 const WIRE_TOOLS = [...TOOLS, ...OPENCODE_FINGERPRINT_TOOLS.map((name) => expect.objectContaining({ type: "function", name }))];
 
+/**
+ * Every Responses request goes through applyFingerprintTools(), which appends the
+ * free-tier decoy tools (see open-sse/utils/opencodeFingerprint.js). The client's own
+ * tools must survive untouched next to them.
+ */
+function expectClientToolsPlusFingerprintDecoys(tools) {
+  const clientNames = new Set(TOOLS.map((t) => t.name));
+  const decoys = tools.filter((t) => !clientNames.has(t.name)).map((t) => t.name).sort();
+  expect(decoys).toEqual([...OPENCODE_FINGERPRINT_TOOLS].sort());
+  expect(tools.filter((t) => clientNames.has(t.name))).toEqual(TOOLS);
+}
+
 function responsesBody(model, tool_choice) {
   const body = { model, input: structuredClone(INPUT), tools: structuredClone(TOOLS) };
   if (tool_choice !== undefined) body.tool_choice = tool_choice;
