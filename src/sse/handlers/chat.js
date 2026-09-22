@@ -234,6 +234,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const adapterAdded = augmentedModels.filter((m) => !policyModels.includes(m));
     const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded });
     trace.liveId = liveRequestId;
+    ensureCombo(trace, { name: modelStr, strategy: comboStrategy, adapterAdded, kind: trace.combo?.kind || null });
     const runComboModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
       const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
@@ -283,6 +284,7 @@ export async function handleChat(request, clientRawRequest = null) {
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
     const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded, kind: "capacity" });
     trace.liveId = liveRequestId;
+    ensureCombo(trace, { name: modelStr, strategy: comboStrategy, adapterAdded, kind: "capacity" });
     const runAdapterModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
       const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
