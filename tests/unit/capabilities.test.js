@@ -8,14 +8,23 @@ describe("getCapabilitiesForModel", () => {
     expect(getCapabilitiesForModel(undefined, "deepseek-v4.1-flash")).toMatchObject(v41);
     expect(getCapabilitiesForModel("opencode-go", "deepseek-v4.1-flash")).toMatchObject(v41);
     expect(getCapabilitiesForModel("openrouter", "deepseek/deepseek-v4.1-flash")).toMatchObject(v41);
-    // "deepseek-flash" is the GA id for V4.1-Flash on the DeepSeek API; the pattern it
-    // used to fall through to gives it 128K/64K, which the exact entry keeps.
-    expect(getCapabilitiesForModel("opencode-go", "deepseek-flash")).toMatchObject({
+    // "deepseek-flash" is the GA id for V4.1-Flash on the DeepSeek API: the exact
+    // MODEL_CAPABILITIES entry keeps the 128K/64K pattern limits there. On OpenCode
+    // Go the provider's own model list declares 1M/384K (same as the live catalog),
+    // and a registry declaration wins over the local tables.
+    expect(getCapabilitiesForModel("deepseek", "deepseek-flash")).toMatchObject({
       vision: true,
       reasoning: true,
       thinkingFormat: "deepseek",
       contextWindow: 128000,
       maxOutput: 64000,
+    });
+    expect(getCapabilitiesForModel("opencode-go", "deepseek-flash")).toMatchObject({
+      vision: true,
+      reasoning: true,
+      thinkingFormat: "deepseek",
+      contextWindow: 1000000,
+      maxOutput: 384000,
     });
     // the superseded text-only Flash id stays text-only
     expect(getCapabilitiesForModel("opencode-go", "deepseek-v4-flash").vision).toBe(false);
