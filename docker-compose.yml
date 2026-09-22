@@ -33,6 +33,9 @@ services:
     init: true
     stop_grace_period: 30s
     network_mode: host
+    # The upgrade agent runs as `node`; the mounted production socket is root:docker.
+    group_add:
+      - "${DOCKER_GID:-984}"
     env_file:
       # Optional: copy .env.example to .env to override defaults.
       - path: .env
@@ -46,11 +49,22 @@ services:
       HEADROOM_URL: http://127.0.0.1:8787
       BASE_URL: http://localhost:20128
       NEXT_PUBLIC_BASE_URL: http://localhost:20128
+      # Upgrade agent (opencode): config/state live in the data volume.
+      UPGRADE_REPO_PATH: /workspace/9router
+      OPENCODE_CONFIG_DIR: /app/data/opencode
+      OPENCODE_CONFIG: /app/data/opencode/opencode.json
+      XDG_DATA_HOME: /app/data/opencode/share
+      # Docker CLI in the container targets the production daemon.
+      DOCKER_HOST: unix:///var/run/docker-prod.sock
     volumes:
       - 9router-data:/app/data
       # Headroom's own home (savings history, ccr store, logs). Without this it
       # lives in the container layer and resets on every recreate.
       - 9router-home:/home/node/.headroom
+      # Fork checkout the upgrade agent rebases/commits in.
+      - ${REPO_PATH:-${HOME}/Bureau/projects/self-hosted/9router}:/workspace/9router
+      # Production daemon socket: lets the agent rebuild and restart this stack.
+      - /var/run/docker-prod.sock:/var/run/docker-prod.sock
     healthcheck:
       test:
         - CMD

@@ -194,6 +194,27 @@ HEADROOM_EXTRAS=proxy,code docker-prod compose build router
 
 Extras can also be toggled from the dashboard (`Endpoint → Token Saver → Headroom`): the venv ships pip and is owned by the container user, so in-app installs work. They are lost when the image is rebuilt.
 
+## Upgrade agent (dashboard button)
+
+The self-hosted image ships the opencode CLI (v2, pinned) plus git/ripgrep and the Docker CLI, so this fork can be upgraded without leaving the dashboard.
+
+- **Button**: Dashboard → Profile → *Upgrade agent* — it sits with the version info and enables when `/api/version` reports an update.
+- **Model**: set the model (or combo) in the same card. The run passes it as `opencode run --model 9router/<model>`, so the agent talks to this router with the model you configured there.
+- **What it runs**: `skills/9router-upgrade/SKILL.md` — fetch upstream, backup branch, rebase, resolve conflicts keeping both sides, `npm run build`, the regression gate, focused commits. The prompt forbids pushing.
+- **Finish**: the agent rebuilds and restarts this stack (`docker compose up -d --build`) as its final step, which recreates the container it runs in. Commit first, restart last.
+- **Mounts it needs** (already in `docker-compose.yml`):
+
+  | Mount | Why |
+  |---|---|
+  | `${REPO_PATH:-$HOME/Bureau/projects/self-hosted/9router}` → `/workspace/9router` | the git checkout the agent rebases and commits in |
+  | `/var/run/docker-prod.sock` → same path (plus `group_add` with the socket's GID) | lets the agent rebuild/restart the stack — root-equivalent Docker access |
+  | `9router-data` → `/app/data` (`opencode/` subdir) | opencode config/state, plus run logs and report in `/app/data/upgrade/` |
+
+- **State**: `/app/data/upgrade/{state.json,run.log,last-report.md}`; the card shows the log tail and the last report.
+- The API is local-only (`/api/upgrade/start|stop` require the CLI token or loopback access, like the Headroom endpoints).
+
+**Security note**: mounting the production socket gives this container full control over that daemon. That is intentional for this personal fork — do not reuse this compose file for a shared deployment.
+
 ## What is *not* in the container
 
 | Feature | Why | Where it runs |

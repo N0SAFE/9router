@@ -87,6 +87,37 @@ RUN python3 -m venv /opt/headroom \
 
 ENV PATH="/opt/headroom/bin:${PATH}"
 
+# --- Upgrade agent tooling ----------------------------------------------------
+# The dashboard's "Upgrade agent" button runs `opencode run` against the fork
+# checkout mounted at /workspace/9router, so the container carries the same CLI
+# as the host, plus git/ripgrep for the agent and the Docker CLI + compose
+# plugin so it can rebuild and restart this stack through the mounted socket.
+ARG OPENCODE_VERSION=2.0.12
+ARG DOCKER_CLI_VERSION=29.0.0
+ARG DOCKER_COMPOSE_VERSION=5.5.1
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ripgrep procps curl ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  # The v1 installer cannot fetch v2 builds; use the pinned standalone tarball.
+  && mkdir -p /tmp/oc \
+  && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+       "https://opencode.ai/files/bin/${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" -o /tmp/oc.tgz \
+  && tar -xzf /tmp/oc.tgz -C /tmp/oc \
+  && install -m 0755 "$(find /tmp/oc -maxdepth 3 -type f -name opencode | head -1)" /usr/local/bin/opencode \
+  && rm -rf /tmp/oc /tmp/oc.tgz /root/.opencode \
+  && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+       "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker.tgz \
+  # Some build networks deliver a plain tar (transparent decompression): accept both.
+  && (tar -xzf /tmp/docker.tgz -C /tmp || tar -xf /tmp/docker.tgz -C /tmp) \
+  && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+  && mkdir -p /usr/local/lib/docker/cli-plugins \
+  && curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+       "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+       -o /usr/local/lib/docker/cli-plugins/docker-compose \
+  && chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose \
+  && rm -rf /tmp/docker /tmp/docker.tgz
+
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/.next/standalone ./
@@ -114,8 +145,9 @@ RUN mkdir -p /app/data && chown -R node:node /app && \
   ln -sf /app/data-home /root/.9router 2>/dev/null || true
 
 # Data volume is owned by the unprivileged `node` user; the entrypoint re-asserts
-# ownership because a bind mount / fresh volume arrives owned by root.
-RUN printf '#!/bin/sh\nset -e\nmkdir -p /app/data /app/data-home\nchown -R node:node /app/data /app/data-home 2>/dev/null || true\nexec gosu node "$@"\n' > /entrypoint.sh \
+# ownership because a bind mount / fresh volume arrives owned by root. The git
+# exception lets the upgrade agent use the host-mounted checkout.
+RUN printf '#!/bin/sh\nset -e\nmkdir -p /app/data /app/data-home\nchown -R node:node /app/data /app/data-home 2>/dev/null || true\ngit config --system --add safe.directory "*" 2>/dev/null || true\nexec gosu node "$@"\n' > /entrypoint.sh \
   && chmod +x /entrypoint.sh
 
 EXPOSE 20128
