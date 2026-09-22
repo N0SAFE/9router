@@ -60,18 +60,19 @@ function fingerprintOf(detail) {
 
 /**
  * Loose identity used to attach in-flight requests to a session before the
- * provider/model resolution is known: api key + first user message.
+ * provider/model resolution is known. Request details do not store the API key,
+ * so the identity is the first user message alone.
  */
 export function liveKeyForDetail(detail) {
   const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
   const firstUser = messages.find((message) => message?.role === "user");
-  return `${detail?.apiKey || "nokey"}|${hashText(messageText(firstUser).slice(0, 300))}`;
+  return hashText(messageText(firstUser).slice(0, 300));
 }
 
-export function liveKeyForRequest({ apiKey, messages } = {}) {
+export function liveKeyForRequest({ messages } = {}) {
   const list = Array.isArray(messages) ? messages : [];
   const firstUser = list.find((message) => message?.role === "user");
-  return `${apiKey || "nokey"}|${hashText(messageText(firstUser).slice(0, 300))}`;
+  return hashText(messageText(firstUser).slice(0, 300));
 }
 
 function tokenMetrics(detail) {
@@ -319,6 +320,27 @@ function firstUserMessage(detail) {
   return messageText(user);
 }
 
+const LABEL_NOISE = [/^<environment_info>/i, /^<system/i, /^<[a-z_]+>[\s\S]*<\/[a-z_]+>$/i];
+
+/** First meaningful user message across the session, with a model fallback. */
+function pickLabel(details) {
+  for (const detail of details) {
+    const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
+    for (const message of messages) {
+      if (message?.role !== "user") continue;
+      const text = messageText(message).trim();
+      if (!text || LABEL_NOISE.some((pattern) => pattern.test(text))) continue;
+      return text.slice(0, 96);
+    }
+  }
+  const first = details[0];
+  const model = first?.model ? `${first.provider ? `${first.provider}/` : ""}${first.model}` : "request";
+  const when = first?.timestamp
+    ? new Date(first.timestamp).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })
+    : "";
+  return `${model}${when ? ` · ${when}` : ""}`;
+}
+
 export function summarizeSession(details = []) {
   const sorted = [...details].sort((a, b) => new Date(a?.timestamp || 0) - new Date(b?.timestamp || 0));
   const first = sorted[0] || null;
@@ -340,7 +362,7 @@ export function summarizeSession(details = []) {
     if (detail?.model) models.add(detail.model);
   }
 
-  const label = (firstUserMessage(first) || first?.request?.metadata?.sessionId || "session").slice(0, 96);
+  const label = pickLabel(sorted);
 
   return {
     label,

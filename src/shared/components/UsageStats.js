@@ -53,9 +53,11 @@ function RecentRequests({ requests = [], onSelect }) {
     let cancelled = false;
     const load = async () => {
       try {
-        const response = await fetch("/api/usage/sessions?limit=20&live=1", { cache: "no-store" });
+        const response = await fetch("/api/usage/live-requests", { cache: "no-store" });
         const payload = await response.json();
-        if (!cancelled) setLiveSessions(payload.sessions || []);
+        if (!cancelled) {
+          setLiveSessions((payload.requests || []).filter((entry) => !entry.persisted).slice(0, 20));
+        }
       } catch {
         // keep the previous list
       }
@@ -68,8 +70,8 @@ function RecentRequests({ requests = [], onSelect }) {
     };
   }, [tab]);
 
-  const openSession = (sessionId) => {
-    const params = new URLSearchParams({ tab: "sessions", session: sessionId });
+  const openRequest = (requestId) => {
+    const params = new URLSearchParams({ tab: "sessions", view: "requests", request: requestId });
     router.push(`/dashboard/usage?${params.toString()}`, { scroll: false });
   };
 
@@ -110,7 +112,7 @@ function RecentRequests({ requests = [], onSelect }) {
                 <li key={session.id}>
                   <button
                     type="button"
-                    onClick={() => openSession(session.id)}
+                    onClick={() => openRequest(session.id)}
                     className="flex w-full flex-col gap-0.5 px-2 py-2 text-left transition-colors hover:bg-bg-subtle"
                   >
                     <span className="flex items-center gap-1.5">
@@ -119,13 +121,21 @@ function RecentRequests({ requests = [], onSelect }) {
                       ) : (
                         <span className="block w-1.5 h-1.5 rounded-full bg-success" title="live" />
                       )}
-                      <span className="truncate text-xs font-medium text-text-main">{session.label || session.id}</span>
+                      <span className="truncate text-xs font-medium text-text-main">
+                        {session.label || session.requestedModel || session.id}
+                      </span>
                     </span>
                     <span className="flex items-center gap-2 text-[10px] text-text-muted">
-                      <span className="truncate">{session.model || "—"}</span>
-                      <span>{session.requests} req</span>
-                      <span>{fmt(session.tokens)} tok</span>
-                      <span className="ml-auto">{session.generating ? "generating…" : "idle"}</span>
+                      <span className="truncate font-mono">{session.requestedModel || session.model || "—"}</span>
+                      {session.combo ? <span className="text-brand-500">combo {session.combo}</span> : null}
+                      {session.attempts?.length > 0 ? <span>{session.attempts.length} attempt(s)</span> : null}
+                      <span className="ml-auto">
+                        {session.status === "streaming"
+                          ? "streaming…"
+                          : session.status === "error"
+                            ? "failed"
+                            : "routing…"}
+                      </span>
                     </span>
                   </button>
                 </li>

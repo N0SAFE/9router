@@ -26,6 +26,19 @@ function clip(value) {
   return text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}…` : text;
 }
 
+import { pushRoutingEvent } from "@/lib/usage/liveRouting.js";
+
+// Mirror routing decisions into the live registry so the Sessions tab can
+// stream what the router is doing with a running request. Best-effort only.
+function emitLive(trace, event) {
+  if (!trace?.liveId) return;
+  try {
+    pushRoutingEvent(trace.liveId, event);
+  } catch {
+    // live telemetry must never break routing
+  }
+}
+
 export function createRoutingTrace({ requestedModel, sourceFormat, comboName = null, comboStrategy = null, adapterAdded = [], kind = null } = {}) {
   const trace = {
     requestedModel: clip(requestedModel) || null,
@@ -51,6 +64,13 @@ export function ensureCombo(trace, { name, strategy = "fallback", adapterAdded =
     adapterModels: Array.isArray(adapterAdded) ? adapterAdded.slice(0, 10).map(clip) : [],
     models: trace.combo?.models || [],
   };
+  emitLive(trace, {
+    type: "combo",
+    combo: name,
+    strategy: clip(strategy) || "fallback",
+    adapterModels: Array.isArray(adapterAdded) ? adapterAdded.slice(0, 10).map(clip) : [],
+    message: `combo “${name}” (${clip(strategy) || "fallback"})`,
+  });
   return trace;
 }
 
@@ -60,6 +80,13 @@ export function recordComboModel(trace, model, { status = "unknown", error = nul
   const existing = trace.combo.models.findIndex((m) => m.model === entry.model && m.status === "pending");
   if (existing >= 0) trace.combo.models[existing] = entry;
   else if (trace.combo.models.length < MAX_MODELS) trace.combo.models.push(entry);
+  emitLive(trace, {
+    type: "combo-model",
+    model: entry.model,
+    status: entry.status,
+    error: entry.error,
+    message: `${entry.model} · ${entry.status}${entry.error ? ` — ${entry.error}` : ""}`,
+  });
 }
 
 export function recordModelSelection(trace, { provider, model, reason = null } = {}) {
@@ -67,6 +94,13 @@ export function recordModelSelection(trace, { provider, model, reason = null } =
   trace.provider = clip(provider) || trace.provider;
   trace.model = clip(model) || trace.model;
   if (reason) trace.selectionReason = clip(reason);
+  emitLive(trace, {
+    type: "model",
+    provider: clip(provider) || null,
+    model: clip(model) || null,
+    reason: reason ? clip(reason) : null,
+    message: `model ${clip(provider) || "?"}/${clip(model) || "?"}${reason ? ` (${clip(reason)})` : ""}`,
+  });
 }
 
 export function recordPool(trace, { provider, strategy = null, total = null, available = null, accounts = null } = {}) {
@@ -83,6 +117,14 @@ export function recordPool(trace, { provider, strategy = null, total = null, ava
         }))
       : trace.pool?.accounts,
   };
+  emitLive(trace, {
+    type: "pool",
+    provider: trace.pool.provider,
+    strategy: trace.pool.strategy,
+    total: trace.pool.total,
+    available: trace.pool.available,
+    message: `pool ${trace.pool.provider || "?"} · ${trace.pool.strategy || "default"}${trace.pool.total != null ? ` · ${trace.pool.available ?? "?"}/${trace.pool.total} available` : ""}`,
+  });
 }
 
 export function recordAccountSelected(trace, { connectionId, connectionName, reason = null } = {}) {
@@ -92,6 +134,13 @@ export function recordAccountSelected(trace, { connectionId, connectionName, rea
     name: clip(connectionName) || null,
     reason: reason ? clip(reason) : trace.selected?.reason || null,
   };
+  emitLive(trace, {
+    type: "account",
+    connectionId: trace.selected.connectionId,
+    connectionName: trace.selected.name,
+    reason: trace.selected.reason,
+    message: `account ${trace.selected.name || trace.selected.connectionId || "?"}${trace.selected.reason ? ` (${trace.selected.reason})` : ""}`,
+  });
 }
 
 function lastAttempt(trace) {
@@ -116,10 +165,21 @@ export function recordAccountAttempt(trace, { connectionId, name, status = null,
     cooldownMs: Number(cooldownMs) || 0,
     at: new Date().toISOString(),
   });
+  emitLive(trace, {
+    type: "attempt",
+    connectionId: clip(connectionId) || null,
+    connectionName: clip(name) || null,
+    status: status == null ? null : (Number.isFinite(Number(status)) ? Number(status) : clip(status)),
+    error: error ? clip(error) : null,
+    action: action ? clip(action) : null,
+    cooldownMs: Number(cooldownMs) || 0,
+    message: `attempt ${clip(name) || clip(connectionId) || "?"} · ${status == null ? "?" : status}${error ? ` — ${clip(error)}` : ""}${action ? ` → ${clip(action)}` : ""}`,
+  });
 }
 
 export function recordRoutingNote(trace, note) {
   if (trace) trace.note = clip(note);
+  emitLive(trace, { type: "note", message: clip(note) });
 }
 
 /** Compact one-line summary for logs / usage history. */

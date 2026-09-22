@@ -18,6 +18,7 @@ import Button from "@/shared/components/Button";
 import SegmentedControl from "@/shared/components/SegmentedControl";
 import { cn } from "@/shared/utils/cn";
 import { fmtCompact, fmtCost, fmtDuration } from "./format";
+import LiveRequestsView from "./LiveRequestsView";
 
 const VIEWS = [
   { value: "timeline", label: "Timeline" },
@@ -87,6 +88,8 @@ function SpikeIcon({ flags }) {
 export default function SessionsTab() {
   const searchParams = useSearchParams();
   const requestedSession = searchParams.get("session");
+  const requestedRequest = searchParams.get("request");
+  const [tab, setTab] = useState(() => (searchParams.get("view") === "sessions" ? "sessions" : "requests"));
   const [sessions, setSessions] = useState([]);
   const [counts, setCounts] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -257,6 +260,32 @@ export default function SessionsTab() {
     <div className="flex min-w-0 flex-col gap-4">
       {error ? <p className="text-xs text-danger">{error}</p> : null}
 
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SegmentedControl
+          options={[
+            { value: "requests", label: "Live requests" },
+            { value: "sessions", label: "Sessions" },
+          ]}
+          value={tab}
+          onChange={setTab}
+          size="sm"
+        />
+        <span className="text-[11px] text-text-muted">
+          {tab === "requests"
+            ? "every request as the router resolves combo, model, pool and account — streamed live"
+            : "conversations with per-turn tokens, cost, latency and spikes"}
+        </span>
+      </div>
+
+      {tab === "requests" ? (
+        <LiveRequestsView
+          initialRequestId={requestedRequest}
+          onOpenSession={(sessionId) => {
+            setSelectedId(sessionId);
+            setTab("sessions");
+          }}
+        />
+      ) : (
       <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(260px,320px)_minmax(0,1fr)]">
         {/* Session list */}
         <Card padding="sm" className="flex min-w-0 flex-col gap-2">
@@ -706,6 +735,7 @@ export default function SessionsTab() {
           )}
         </Card>
       </div>
+      )}
     </div>
   );
 }

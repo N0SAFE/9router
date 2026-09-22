@@ -57,6 +57,7 @@ import {
 import { beginKeyRequest, endKeyRequest } from "@/lib/keys/concurrency.js";
 import { isConnectionAllowed } from "@/lib/keys/policy.js";
 import { registerSessionStart } from "@/lib/usage/liveSessions.js";
+import { finishLiveRequest, pushRoutingEvent, startLiveRequest } from "@/lib/usage/liveRouting.js";
 import { liveKeyForRequest } from "@/lib/usage/sessions.js";
 
 /**
@@ -173,6 +174,7 @@ export async function handleChat(request, clientRawRequest = null) {
   }
 
   const requiredCapabilities = detectRequiredCapabilities(body);
+  let liveRequestId = null;
 
   // Announce the session start before routing so the Sessions tab can list and
   // attach to a session while its first request is still generating (details
@@ -190,13 +192,25 @@ export async function handleChat(request, clientRawRequest = null) {
       : Array.isArray(firstUser?.content)
         ? firstUser.content.map((part) => part?.text || "").join(" ")
         : "";
+    const liveKey = explicitSessionId ? null : liveKeyForRequest({ apiKey, messages });
     registerSessionStart({
       sessionId: explicitSessionId,
-      liveKey: explicitSessionId ? null : liveKeyForRequest({ apiKey, messages }),
+      liveKey,
       provider: slash > 0 ? modelStr.slice(0, slash) : null,
       model: slash > 0 ? modelStr.slice(slash + 1) : modelStr,
       label: firstText.slice(0, 96) || null,
       apiKey,
+    });
+    liveRequestId = globalThis.crypto?.randomUUID?.() || `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    startLiveRequest({
+      id: liveRequestId,
+      sessionId: explicitSessionId,
+      liveKey,
+      requestedModel: modelStr,
+      provider: slash > 0 ? modelStr.slice(0, slash) : null,
+      model: slash > 0 ? modelStr.slice(slash + 1) : modelStr,
+      apiKey,
+      label: firstText.slice(0, 96) || null,
     });
   } catch {
     // the live registry is best-effort and must never break routing
@@ -219,6 +233,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(policyModels, requiredCapabilities, settings), policyModels);
     const adapterAdded = augmentedModels.filter((m) => !policyModels.includes(m));
     const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded });
+    trace.liveId = liveRequestId;
     const runComboModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
       const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
@@ -267,6 +282,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategy = getActiveAdapterStrategy(requiredCapabilities, settings);
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
     const trace = createRoutingTrace({ requestedModel: modelStr, comboName: modelStr, comboStrategy, adapterAdded, kind: "capacity" });
+    trace.liveId = liveRequestId;
     const runAdapterModel = async (b, m) => {
       recordComboModel(trace, m, { status: "pending" });
       const res = await handleSingleModelChat(b, m, clientRawRequest, request, apiKey, trace, policy);
@@ -283,7 +299,9 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, createRoutingTrace({ requestedModel: modelStr }), policy, contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null);
+  const soloTrace = createRoutingTrace({ requestedModel: modelStr });
+  soloTrace.liveId = liveRequestId;
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, soloTrace, policy, contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null);
 }
 
 /**
@@ -518,6 +536,18 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       // Account served the request: forget session-scoped failures for it so it
       // is immediately eligible again for the rest of the conversation.
       recordAccountSuccess(poolSessionKey, credentials.connectionId, model);
+      pushRoutingEvent(liveRequestId, {
+        type: "streaming",
+        message: `served by ${credentials.connectionName || credentials.connectionId}`,
+        connectionId: credentials.connectionId,
+        connectionName: credentials.connectionName,
+      });
+      finishLiveRequest(liveRequestId, {
+        status: "streaming",
+        provider,
+        model,
+        connectionId: credentials.connectionId,
+      });
       return result.response;
     }
 
@@ -525,6 +555,19 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Explicit ERROR_RULES (429/quota/5xx/auth) keep their fallback semantics;
     // malformed requests stop here; model-ineligibility retires the pair.
     const poolError = classifyPoolError(result.status, result.error, credentials._connection?.backoffLevel || 0);
+
+    pushRoutingEvent(liveRequestId, {
+      type: "error",
+      status: result.status,
+      error: result.error,
+      message: `${result.status ?? "error"}${result.error ? ` — ${result.error}` : ""}`,
+    });
+    if (poolError.action !== POOL_ACTIONS.NON_FALLBACK) {
+      pushRoutingEvent(liveRequestId, {
+        type: "fallback",
+        message: `rotating after ${result.status ?? "error"} (${poolError.action})`,
+      });
+    }
 
     if (poolError.action === POOL_ACTIONS.NON_FALLBACK) {
       recordAccountAttempt(routing, {
