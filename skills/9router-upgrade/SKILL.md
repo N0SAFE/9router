@@ -102,12 +102,21 @@ ln -sfn "$PWD/node_modules" /tmp/9router-pre/node_modules
 ln -sfn "$PWD/tests/node_modules" /tmp/9router-pre/tests/node_modules
 node /tmp/9router-pre/tests/__baseline__/run-gate.mjs --run /tmp/9router-pre.json
 
-# 3. gate — must report 0 pass→fail
-node tests/__baseline__/run-gate.mjs --compare /tmp/9router-pre.json /tmp/9router-after.json
+# 3. results for upstream — its own HEAD can be red (93 failing tests at v0.5.85,
+#    mostly upstream refactor drift), so this reference is required
+git worktree add --detach /tmp/9router-up origin/master
+ln -sfn "$PWD/node_modules" /tmp/9router-up/node_modules
+ln -sfn "$PWD/tests/node_modules" /tmp/9router-up/tests/node_modules
+node /tmp/9router-up/tests/__baseline__/run-gate.mjs --run /tmp/9router-upstream.json
+
+# 4. gate — must report 0 pass→fail; tests that also fail upstream are excluded
+#    automatically and listed separately
+node tests/__baseline__/run-gate.mjs --compare /tmp/9router-pre.json /tmp/9router-after.json /tmp/9router-upstream.json
 ```
 
-When a test fails in the rebased tree but also on a plain `origin/master`
-checkout, judge it against upstream's own run before calling it a rebase error.
+A test that fails in the rebased tree *and* on upstream is upstream's to fix — do not
+patch it in the fork unless it is user-visible and you accept the divergence (the
+conflict comes back on the next rebase).
 
 Snapshot-compare whatever provider-shaped code you touched:
 

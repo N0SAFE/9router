@@ -14,7 +14,7 @@
 //
 // Usage:
 //   node tests/__baseline__/run-gate.mjs --run [results.json] [extra vitest args…]
-//   node tests/__baseline__/run-gate.mjs --compare <before.json> <after.json>
+//   node tests/__baseline__/run-gate.mjs --compare <before.json> <after.json> [upstream.json]
 //
 // Upgrade flow:
 //   node tests/__baseline__/run-gate.mjs --run /tmp/9router-after.json
@@ -92,22 +92,35 @@ function run(outFile, extraArgs = []) {
   process.exit(0);
 }
 
-function compare(beforeFile, afterFile) {
+function compare(beforeFile, afterFile, upstreamFile) {
   const before = loadFailures(beforeFile);
   const after = loadFailures(afterFile);
+  const upstream = upstreamFile ? loadFailures(upstreamFile) : null;
   const beforeFailed = new Set([...before.fails].filter(([, s]) => s === "failed").map(([n]) => n));
   const afterFailed = new Set([...after.fails].filter(([, s]) => s === "failed").map(([n]) => n));
+  const upstreamFailed = upstream
+    ? new Set([...upstream.fails].filter(([, s]) => s === "failed").map(([n]) => n))
+    : new Set();
 
-  const regressions = [...afterFailed].filter((n) => !beforeFailed.has(n)).sort();
+  const candidates = [...afterFailed].filter((n) => !beforeFailed.has(n)).sort();
+  const upstreamBroken = upstream ? candidates.filter((n) => upstreamFailed.has(n)) : [];
+  const regressions = candidates.filter((n) => !upstreamFailed.has(n));
   const fixed = [...beforeFailed].filter((n) => !afterFailed.has(n)).sort();
 
-  console.log(`[gate] before: ${before.total} tests, ${beforeFailed.size} failing  (${beforeFile})`);
-  console.log(`[gate] after:  ${after.total} tests, ${afterFailed.size} failing  (${afterFile})`);
+  console.log(`[gate] before:   ${before.total} tests, ${beforeFailed.size} failing  (${beforeFile})`);
+  console.log(`[gate] after:    ${after.total} tests, ${afterFailed.size} failing  (${afterFile})`);
+  if (upstream) console.log(`[gate] upstream: ${upstream.total} tests, ${upstreamFailed.size} failing  (${upstreamFile})`);
 
   if (fixed.length) {
     console.log(`\n✅ fixed by this change: ${fixed.length}`);
     for (const name of fixed.slice(0, 10)) console.log("  +", name);
     if (fixed.length > 10) console.log(`  ... +${fixed.length - 10} more`);
+  }
+
+  if (upstreamBroken.length) {
+    console.log(`\n⚠️  upstream-broken, not counted as regressions: ${upstreamBroken.length}`);
+    for (const name of upstreamBroken.slice(0, 10)) console.log("  ~", name);
+    if (upstreamBroken.length > 10) console.log(`  ... +${upstreamBroken.length - 10} more`);
   }
 
   if (regressions.length) {
@@ -122,5 +135,5 @@ function compare(beforeFile, afterFile) {
 
 const [mode, ...args] = process.argv.slice(2);
 if (mode === "--run") run(args[0], args.slice(1));
-else if (mode === "--compare" && args.length === 2) compare(args[0], args[1]);
+else if (mode === "--compare" && (args.length === 2 || args.length === 3)) compare(args[0], args[1], args[2]);
 else usage();
