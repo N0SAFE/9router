@@ -11,20 +11,21 @@ import {
   turnContextProblem,
 } from "@/lib/usage/routingEvents";
 import { fmtCompact, fmtCost } from "../format";
-import { Avatar, MicroLabel, PHASES, RailNode, RichText, Shimmer, fmtClock, fmtDurationMs, providerModel } from "./primitives";
+import { Avatar, MicroLabel, PHASES, RailNode, RichText, Shimmer, fmtClock, fmtDurationMs, providerModel, useCopy } from "./primitives";
 import DiagnosticsPanel from "./DiagnosticsPanel";
 import RoutingTracePanel from "./RoutingTracePanel";
 import TurnMetrics from "./TurnMetrics";
+import { buildTranscript } from "./transcript";
 
 const VISIBLE_TURNS = 120;
 const CONTEXT_PREFIX = /^\s*(?:<([a-z_][a-z0-9_]*)>[\s\S]*?<\/\1>\s*)+/i;
 
 /* ------------------------------ message atoms ----------------------------- */
 
-function UserText({ text }) {
+function UserText({ text, query }) {
   const value = String(text || "");
   const match = CONTEXT_PREFIX.exec(value);
-  if (!match) return <RichText text={value} />;
+  if (!match) return <RichText text={value} query={query} />;
   const context = match[0].trim();
   const rest = value.slice(match[0].length).trim();
   return (
@@ -37,17 +38,17 @@ function UserText({ text }) {
           {context}
         </pre>
       </details>
-      {rest ? <RichText text={rest} /> : null}
+      {rest ? <RichText text={rest} query={query} /> : null}
     </div>
   );
 }
 
-function UserBubble({ text, at }) {
+function UserBubble({ text, at, query }) {
   return (
     <div className="flex items-end justify-end gap-2.5">
       <div className="flex min-w-0 max-w-[76%] flex-col items-end gap-1">
         <div className="rounded-2xl rounded-br-sm bg-brand-500/10 px-3.5 py-2.5 text-[13px] leading-relaxed text-text-main ring-1 ring-brand-500/15">
-          <UserText text={text} />
+          <UserText text={text} query={query} />
         </div>
         {at ? <MicroLabel className="pr-1 normal-case tracking-normal">{fmtClock(at)}</MicroLabel> : null}
       </div>
@@ -85,9 +86,7 @@ function RouteChips({ turn }) {
           {trace.combo.name}
         </span>
       ) : null}
-      {account ? (
-        <span className="rounded-md bg-surface-2 px-1.5 py-0.5 font-mono text-[9.5px] text-text-muted">{account}</span>
-      ) : null}
+      {account ? <span className="rounded-md bg-surface-2 px-1.5 py-0.5 font-mono text-[9.5px] text-text-muted">{account}</span> : null}
       {fallbacks > 0 ? (
         <span className="rounded-md bg-warning/10 px-1.5 py-0.5 font-mono text-[9.5px] text-warning" title="fallback attempts before this reply">
           ↻{fallbacks}
@@ -208,28 +207,6 @@ function ToolCallCards({ calls = [], toolMessages = [], streaming = false }) {
   );
 }
 
-function CopyButton({ text }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        } catch {
-          // clipboard unavailable
-        }
-      }}
-      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] text-text-subtle transition-colors hover:bg-surface-2 hover:text-text-muted"
-    >
-      <span className="material-symbols-outlined text-[12px]">{copied ? "check" : "content_copy"}</span>
-      {copied ? "copied" : "copy"}
-    </button>
-  );
-}
-
 function LiveStatus({ entry, now }) {
   if (!entry) return null;
   const elapsed = Math.max(0, (now || entry.startedAt) - entry.startedAt);
@@ -244,7 +221,13 @@ function LiveStatus({ entry, now }) {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2 font-mono text-[10px]">
-        <span className={cn("inline-flex items-center gap-1 rounded-md px-1.5 py-0.5", problem ? "bg-danger/10 text-danger" : "bg-sky-500/10", !problem && meta.tone)}>
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5",
+            problem ? "bg-danger/10 text-danger" : "bg-sky-500/10",
+            !problem && meta.tone
+          )}
+        >
           <span className={cn("size-1.5 animate-pulse rounded-full", problem ? "bg-danger" : meta.dot)} />
           {meta.label}…
         </span>
@@ -259,7 +242,11 @@ function LiveStatus({ entry, now }) {
               key={index}
               className={cn(
                 "truncate font-mono text-[10px]",
-                event.type === "error" ? "text-danger" : event.type === "fallback" || event.type === "attempt" ? "text-warning" : "text-text-subtle"
+                event.type === "error"
+                  ? "text-danger"
+                  : event.type === "fallback" || event.type === "attempt"
+                    ? "text-warning"
+                    : "text-text-subtle"
               )}
             >
               {event.message || event.type}
@@ -271,7 +258,7 @@ function LiveStatus({ entry, now }) {
   );
 }
 
-function AssistantMessage({ turn, past, liveEntry, routeOpen, onToggleRoute, now, maxCost, statusTone }) {
+function AssistantMessage({ turn, past, liveEntry, routeOpen, onToggleRoute, now, statusTone, query }) {
   const assistant = past?.assistant || turn?.assistant;
   const toolCalls = past?.toolCalls || turn?.toolCalls;
   const toolMessages = past?.toolMessages || turn?.toolMessages;
@@ -311,7 +298,7 @@ function AssistantMessage({ turn, past, liveEntry, routeOpen, onToggleRoute, now
           <div className="rounded-2xl rounded-tl-sm border border-border-subtle bg-surface px-4 py-3 text-[13.5px] leading-[1.7] text-text-main">
             {content ? (
               <>
-                <RichText text={content} />
+                <RichText text={content} query={query} />
                 {streaming ? (
                   <span className="ml-0.5 inline-block h-3.5 w-[3px] animate-pulse rounded-full bg-sky-500 align-middle" />
                 ) : null}
@@ -323,11 +310,17 @@ function AssistantMessage({ turn, past, liveEntry, routeOpen, onToggleRoute, now
                 {turn?.status && !isSuccessStatus(turn.status) ? `(${turn.status})` : "no content recorded"}
               </span>
             )}
-            {hasToolCalls ? <div className="mt-2.5"><ToolCallCards calls={toolCalls} toolMessages={toolMessages} streaming={streaming} /></div> : null}
+            {hasToolCalls ? (
+              <div className="mt-2.5">
+                <ToolCallCards calls={toolCalls} toolMessages={toolMessages} streaming={streaming} />
+              </div>
+            ) : null}
           </div>
         ) : (
           <div className="flex flex-col gap-1.5">
-            <MicroLabel>requested {toolCalls.length} tool call{toolCalls.length > 1 ? "s" : ""}</MicroLabel>
+            <MicroLabel>
+              requested {toolCalls.length} tool call{toolCalls.length > 1 ? "s" : ""}
+            </MicroLabel>
             <ToolCallCards calls={toolCalls} toolMessages={toolMessages} streaming={streaming} />
           </div>
         )}
@@ -346,7 +339,6 @@ function AssistantMessage({ turn, past, liveEntry, routeOpen, onToggleRoute, now
               route
             </button>
           ) : null}
-          {content ? <CopyButton text={content} /> : null}
         </div>
 
         {turn ? <DiagnosticsPanel turn={turn} /> : null}
@@ -358,24 +350,20 @@ function AssistantMessage({ turn, past, liveEntry, routeOpen, onToggleRoute, now
 
 /* --------------------------------- the chat ------------------------------- */
 
-function ChatTurn({ turn, past, userMessages, toolMessages, liveEntry, openRoutes, onToggleRoute, now, maxCost, isLast }) {
+function ChatTurn({ turn, past, userMessages, toolMessages, liveEntry, openRoutes, onToggleRoute, now, isLast, query, flash }) {
   const failed = turn ? !isSuccessStatus(turn.status) : false;
   const live = Boolean(liveEntry);
   const railStatus = failed ? "error" : live ? "live" : turn?.status;
 
   return (
-    <article className={cn("relative flex gap-3 px-4", isLast ? "pb-5 pt-3" : "py-3")}>
-      {/* signal rail: one node per exchange */}
+    <article
+      data-exchange={turn ? turn.index : "live"}
+      className={cn("relative flex gap-3 px-4", isLast ? "pb-5 pt-3" : "py-3", flash && "exchange-flash")}
+    >
       <span className="relative flex w-4 shrink-0 justify-center" aria-hidden>
         <span className={cn("absolute top-0 w-px bg-border", isLast ? "h-6" : "h-full")} />
         <span className="relative pt-1.5">
-          <RailNode
-            status={railStatus === "live" ? null : railStatus}
-            live={live}
-            phase={liveEntry?.phase}
-            turn={turn}
-            maxCost={maxCost}
-          />
+          <RailNode status={railStatus === "live" ? null : railStatus} live={live} phase={liveEntry?.phase} turn={turn} />
         </span>
       </span>
 
@@ -386,6 +374,7 @@ function ChatTurn({ turn, past, userMessages, toolMessages, liveEntry, openRoute
                 key={`user-${index}`}
                 text={message.text || (message.redacted ? "(content hidden)" : "")}
                 at={turn?.timestamp}
+                query={query}
               />
             ))
           : null}
@@ -399,18 +388,25 @@ function ChatTurn({ turn, past, userMessages, toolMessages, liveEntry, openRoute
           routeOpen={Boolean(turn && openRoutes[turn.id || `turn-${turn.index}`])}
           onToggleRoute={() => turn && onToggleRoute(turn.id || `turn-${turn.index}`)}
           now={now}
-          maxCost={maxCost}
+          query={query}
         />
       </div>
     </article>
   );
 }
 
-export default function ChatView({ session, turns, content, openRoutes, onToggleRoute, now, maxCost }) {
+export default function ChatView({ session, turns, content, openRoutes, onToggleRoute, now, jumpRequest, activeIndex, onActiveIndex }) {
   const scrollRef = useRef(null);
   const [pinned, setPinned] = useState(true);
   const [showAll, setShowAll] = useState(false);
+  const [find, setFind] = useState("");
+  const [matchCursor, setMatchCursor] = useState(0);
+  const [problemsOnly, setProblemsOnly] = useState(false);
+  const [flashIndex, setFlashIndex] = useState(null);
   const keepScrollRef = useRef(null);
+  const pendingJumpRef = useRef(null);
+  const flashTimer = useRef(null);
+  const { copied, copy } = useCopy();
 
   const liveTurns = useMemo(() => {
     const entries = content?.live || [];
@@ -425,8 +421,105 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
     });
   }, [content, turns]);
 
-  const hiddenCount = showAll ? 0 : Math.max(0, turns.length - VISIBLE_TURNS);
-  const visibleTurns = hiddenCount > 0 ? turns.slice(hiddenCount) : turns;
+  /* ------------------------------ find & filter ---------------------------- */
+
+  const turnSearchText = useCallback(
+    (turn) => {
+      const past = content?.past?.find((entry) => entry.index === turn.index);
+      const parts = [];
+      for (const message of past?.userMessages || turn.userMessages || []) parts.push(message.text || "");
+      for (const message of past?.toolMessages || turn.toolMessages || []) parts.push(message.text || "");
+      const assistant = past?.assistant || turn.assistant;
+      if (assistant?.content) parts.push(assistant.content);
+      if (assistant?.thinking) parts.push(assistant.thinking);
+      for (const call of past?.toolCalls || turn.toolCalls || []) {
+        parts.push(call.name || "", typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments || {}), call.result || "");
+      }
+      return parts.join("\n").toLowerCase();
+    },
+    [content]
+  );
+
+  const matches = useMemo(() => {
+    const needle = find.trim().toLowerCase();
+    if (!needle) return [];
+    return turns.map((turn, index) => (turnSearchText(turn).includes(needle) ? index : -1)).filter((index) => index >= 0);
+  }, [find, turns, turnSearchText]);
+
+  const problemIndexes = useMemo(
+    () =>
+      turns
+        .map((turn, index) => {
+          const failed = !isSuccessStatus(turn.status);
+          const retried = fallbackCount(turn.routing) > 0;
+          const context = turnContextProblem(turn);
+          const cacheMiss = (turn.tokens?.input || 0) >= 2000 && !turn.tokens?.cached;
+          const spike = (turn.flags || []).length > 0;
+          return failed || retried || context || cacheMiss || spike ? index : -1;
+        })
+        .filter((index) => index >= 0),
+    [turns]
+  );
+
+  /* -------------------------------- navigation ----------------------------- */
+
+  const revealIndex = useCallback(
+    (index) => {
+      const container = scrollRef.current;
+      if (!container) return;
+      const node = container.querySelector(`[data-exchange="${index}"]`);
+      if (!node) return;
+      container.scrollTop += node.getBoundingClientRect().top - container.getBoundingClientRect().top - 12;
+      setPinned(false);
+      setFlashIndex(index);
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+      flashTimer.current = setTimeout(() => setFlashIndex(null), 1500);
+      onActiveIndex?.(index);
+    },
+    [onActiveIndex]
+  );
+
+  const requestJump = useCallback(
+    (index) => {
+      if (!Number.isFinite(index)) return;
+      const hidden = showAll ? 0 : Math.max(0, turns.length - VISIBLE_TURNS);
+      if (index < hidden) {
+        pendingJumpRef.current = index;
+        setShowAll(true);
+        return;
+      }
+      revealIndex(index);
+    },
+    [revealIndex, showAll, turns.length]
+  );
+
+  useEffect(() => {
+    // Imperative command from the minimap / timeline: expanding hidden turns and
+    // flashing the target requires state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (jumpRequest?.nonce) requestJump(jumpRequest.index);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpRequest?.nonce]);
+
+  useEffect(() => {
+    if (showAll && pendingJumpRef.current !== null) {
+      const index = pendingJumpRef.current;
+      pendingJumpRef.current = null;
+      requestAnimationFrame(() => revealIndex(index));
+    }
+  }, [showAll, revealIndex]);
+
+  const goToMatch = useCallback(
+    (delta) => {
+      if (!matches.length) return;
+      const next = (((matchCursor + delta) % matches.length) + matches.length) % matches.length;
+      setMatchCursor(next);
+      requestJump(matches[next]);
+    },
+    [matches, matchCursor, requestJump]
+  );
+
+  /* --------------------------------- scroll -------------------------------- */
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -434,7 +527,18 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     const next = distance < 56;
     setPinned((current) => (current === next ? current : next));
-  }, []);
+
+    // Report the exchange nearest the top of the viewport to the minimap.
+    const nodes = el.querySelectorAll("[data-exchange]");
+    const containerTop = el.getBoundingClientRect().top;
+    for (const node of nodes) {
+      if (node.getBoundingClientRect().bottom - containerTop > 24) {
+        const value = node.getAttribute("data-exchange");
+        if (value !== "live" && value !== String(activeIndex)) onActiveIndex?.(Number(value));
+        break;
+      }
+    }
+  }, [activeIndex, onActiveIndex]);
 
   const jumpToLatest = useCallback(() => {
     const el = scrollRef.current;
@@ -443,18 +547,11 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
     setPinned(true);
   }, []);
 
-  // Follow new content only while the reader is already at the bottom, and
-  // only ever scroll the conversation container — never the page.
-  const contentVersion = `${turns.length}:${(content?.live || []).reduce(
-    (sum, entry) => sum + (entry.assistant?.length || 0) + (entry.thinking?.length || 0),
-    0
-  )}`;
   useEffect(() => {
     const el = scrollRef.current;
     if (el && pinned) el.scrollTop = el.scrollHeight;
-  }, [contentVersion, pinned]);
+  }, [content, turns.length, pinned]);
 
-  // Keep the reading position when earlier turns are revealed above.
   useEffect(() => {
     const el = scrollRef.current;
     const saved = keepScrollRef.current;
@@ -470,14 +567,113 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
     setShowAll(true);
   };
 
+  const handleKeyDown = (event) => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    if (event.key === "j" || event.key === "ArrowDown") {
+      event.preventDefault();
+      requestJump(Math.min(turns.length - 1, (activeIndex ?? -1) + 1));
+    } else if (event.key === "k" || event.key === "ArrowUp") {
+      event.preventDefault();
+      requestJump(Math.max(0, (activeIndex ?? 1) - 1));
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      requestJump(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      jumpToLatest();
+    } else if (event.key === "Escape") {
+      setFind("");
+    }
+  };
+
+  /* --------------------------------- render -------------------------------- */
+
+  const hiddenCount = showAll ? 0 : Math.max(0, turns.length - VISIBLE_TURNS);
+  const visibleTurns = problemsOnly
+    ? problemIndexes.map((index) => turns[index]).filter(Boolean)
+    : hiddenCount > 0
+      ? turns.slice(hiddenCount)
+      : turns;
+  const query = find.trim() || null;
+
   return (
     <section className="relative flex min-w-0 flex-col overflow-hidden rounded-[var(--radius-brand-lg)] border border-border bg-bg">
-      <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface/60 px-4 py-2">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border bg-surface/60 px-4 py-2">
         <MicroLabel>conversation</MicroLabel>
         <span className="font-mono text-[10px] tabular-nums text-text-subtle">
           {turns.length} exchange{turns.length === 1 ? "" : "s"}
           {liveTurns.length > 0 ? ` · ${liveTurns.length} live` : ""}
         </span>
+
+        <span className="flex items-center gap-1 rounded-lg border border-border bg-bg px-1.5 py-0.5">
+          <span className="material-symbols-outlined text-[13px] text-text-subtle">search</span>
+          <input
+            value={find}
+            onChange={(event) => {
+              setFind(event.target.value);
+              setMatchCursor(0);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                goToMatch(event.shiftKey ? -1 : 1);
+              }
+            }}
+            placeholder="find in conversation"
+            className="h-6 w-32 bg-transparent font-mono text-[10.5px] text-text-main outline-none placeholder:text-text-subtle"
+            aria-label="Find in conversation"
+          />
+          {find ? (
+            <>
+              <span className="font-mono text-[9.5px] tabular-nums text-text-subtle">
+                {matches.length ? `${(matchCursor % matches.length) + 1}/${matches.length}` : "0"}
+              </span>
+              <button
+                type="button"
+                onClick={() => goToMatch(-1)}
+                className="rounded px-0.5 text-text-subtle hover:bg-surface-2 hover:text-text-main"
+                aria-label="Previous match"
+              >
+                <span className="material-symbols-outlined text-[13px]">keyboard_arrow_up</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => goToMatch(1)}
+                className="rounded px-0.5 text-text-subtle hover:bg-surface-2 hover:text-text-main"
+                aria-label="Next match"
+              >
+                <span className="material-symbols-outlined text-[13px]">keyboard_arrow_down</span>
+              </button>
+            </>
+          ) : null}
+        </span>
+
+        {problemIndexes.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setProblemsOnly((value) => !value)}
+            className={cn(
+              "rounded-lg px-1.5 py-0.5 font-mono text-[10px] transition-colors",
+              problemsOnly ? "bg-warning/15 text-warning" : "text-text-subtle hover:bg-surface-2 hover:text-text-muted"
+            )}
+            title="exchanges with failures, retries, cache misses, spikes or context problems"
+          >
+            problems {problemIndexes.length}
+          </button>
+        ) : null}
+
+        <button
+          type="button"
+          onClick={() => copy(buildTranscript(session, turns))}
+          className={cn(
+            "rounded-lg px-1.5 py-0.5 font-mono text-[10px] transition-colors hover:bg-surface-2",
+            copied ? "text-emerald-600 dark:text-emerald-400" : "text-text-subtle hover:text-text-muted"
+          )}
+          title="Copy the whole conversation as Markdown"
+        >
+          {copied ? "copied" : "transcript"}
+        </button>
+
         <span className="ml-auto flex items-center gap-2 font-mono text-[10px] text-text-subtle">
           {pinned ? (
             <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
@@ -485,10 +681,10 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
               following
             </span>
           ) : (
-            <button type="button" onClick={jumpToLatest} className="inline-flex items-center gap-1 text-brand-500 hover:underline">
-              <span className="material-symbols-outlined text-[12px]">south</span>
-              jump to latest
-            </button>
+            <span className="inline-flex items-center gap-1">
+              <span className="size-1.5 rounded-full bg-border" />
+              scrolled up
+            </span>
           )}
         </span>
       </header>
@@ -496,9 +692,18 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex max-h-[min(72vh,780px)] min-h-[320px] flex-col overflow-y-auto overscroll-contain"
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        className="session-scroll flex max-h-[min(72vh,780px)] min-h-[320px] flex-col overflow-y-auto overscroll-contain outline-none"
       >
-        {hiddenCount > 0 ? (
+        {problemsOnly ? (
+          <p className="border-b border-border bg-warning/5 px-4 py-1.5 font-mono text-[10px] text-warning">
+            showing {problemIndexes.length} problem exchange{problemIndexes.length === 1 ? "" : "s"} ·{" "}
+            <button type="button" onClick={() => setProblemsOnly(false)} className="underline">
+              show all {turns.length}
+            </button>
+          </p>
+        ) : hiddenCount > 0 ? (
           <div className="px-4 pb-1 pt-4">
             <button
               type="button"
@@ -523,36 +728,40 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
               openRoutes={openRoutes}
               onToggleRoute={onToggleRoute}
               now={now}
-              maxCost={maxCost}
               isLast={isLastVisible}
+              query={query}
+              flash={flashIndex === turn.index}
             />
           );
         })}
 
-        {liveTurns.map((entry, index) => (
-          <ChatTurn
-            key={entry.requestId}
-            liveEntry={entry}
-            past={{
-              assistant: { content: entry.assistant, thinking: entry.thinking },
-              toolCalls: entry.toolCalls,
-              userMessages: entry.userText ? [{ role: "user", text: entry.userText }] : [],
-            }}
-            userMessages={entry.userText ? [{ role: "user", text: entry.userText }] : null}
-            openRoutes={{ [entry.requestId]: false }}
-            onToggleRoute={() => {}}
-            now={now}
-            maxCost={maxCost}
-            isLast={index === liveTurns.length - 1}
-          />
-        ))}
+        {!problemsOnly
+          ? liveTurns.map((entry, index) => (
+              <ChatTurn
+                key={entry.requestId}
+                liveEntry={entry}
+                past={{
+                  assistant: { content: entry.assistant, thinking: entry.thinking },
+                  toolCalls: entry.toolCalls,
+                }}
+                userMessages={entry.userText ? [{ role: "user", text: entry.userText }] : null}
+                openRoutes={{ [entry.requestId]: false }}
+                onToggleRoute={() => {}}
+                now={now}
+                isLast={index === liveTurns.length - 1}
+                query={query}
+              />
+            ))
+          : null}
 
-        {turns.length === 0 && liveTurns.length === 0 ? (
+        {visibleTurns.length === 0 && liveTurns.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-16 text-center">
             <span className="material-symbols-outlined text-[26px] text-text-subtle">forum</span>
-            <p className="text-sm font-medium text-text-main">No exchanges yet</p>
+            <p className="text-sm font-medium text-text-main">{problemsOnly ? "No problem exchanges" : "No exchanges yet"}</p>
             <p className="max-w-sm text-xs leading-relaxed text-text-muted">
-              Send a message through 9Router with this session id and the conversation streams in here.
+              {problemsOnly
+                ? "Nothing in this session failed, retried, spiked or lost its cache."
+                : "Send a message through 9Router with this session id and the conversation streams in here."}
             </p>
           </div>
         ) : null}

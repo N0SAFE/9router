@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/shared/utils/cn";
 import SegmentedControl from "@/shared/components/SegmentedControl";
 import { eventsFromTrace, isSuccessStatus } from "@/lib/usage/routingEvents";
@@ -28,8 +29,32 @@ export default function TimelineView({
   maxCost,
   liveEntry,
   now,
+  jumpRequest,
+  onActiveIndex,
 }) {
   const nowMs = now;
+  const scrollRef = useRef(null);
+  const [flashIndex, setFlashIndex] = useState(null);
+  const flashTimer = useRef(null);
+
+  const revealIndex = useCallback(
+    (index) => {
+      const container = scrollRef.current;
+      if (!container) return;
+      const node = container.querySelector(`[data-exchange="${index}"]`);
+      if (!node) return;
+      container.scrollTop += node.getBoundingClientRect().top - container.getBoundingClientRect().top - 12;
+      setFlashIndex(index);
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+      flashTimer.current = setTimeout(() => setFlashIndex(null), 1500);
+      onActiveIndex?.(index);
+    },
+    [onActiveIndex]
+  );
+
+  useEffect(() => {
+    if (jumpRequest?.nonce) revealIndex(jumpRequest.index);
+  }, [jumpRequest, revealIndex]);
   const liveStart = liveEntry?.startedAt || null;
   const liveOffset = liveStart && timeline ? Math.max(0, liveStart - timeline.startMs) : null;
   const livePct =
@@ -86,7 +111,7 @@ export default function TimelineView({
         </span>
       </div>
 
-      <div className="max-h-[min(72vh,780px)] min-w-0 overflow-y-auto overscroll-contain">
+      <div ref={scrollRef} className="session-scroll max-h-[min(72vh,780px)] min-w-0 overflow-y-auto overscroll-contain">
         {turns.length === 0 ? (
           <p className="px-4 py-10 text-center text-xs text-text-muted">No completed exchanges yet.</p>
         ) : null}
@@ -114,10 +139,15 @@ export default function TimelineView({
             <div key={key} className="border-b border-border last:border-b-0">
               <button
                 type="button"
-                onClick={() => setExpandedTurn((current) => (current === key ? null : key))}
+                data-exchange={turn.index}
+                onClick={() => {
+                  setExpandedTurn((current) => (current === key ? null : key));
+                  onActiveIndex?.(turn.index);
+                }}
                 className={cn(
                   "flex w-full items-center gap-3 px-4 py-2 text-left transition-colors hover:bg-surface-2/40",
-                  spikeIds.has(turn.id) && "bg-warning/5"
+                  spikeIds.has(turn.id) && "bg-warning/5",
+                  flashIndex === turn.index && "exchange-flash"
                 )}
               >
                 <span className="flex w-40 shrink-0 items-center gap-2">

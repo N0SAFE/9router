@@ -602,3 +602,92 @@ button:disabled,
   border-top: 1px solid var(--color-border);
   margin: 1.5rem 0;
 }
+
+/* ============================================================
+   Sessions inspector — utilities
+   ============================================================ */
+
+/* Keyboard floor: every interactive element gets a visible ring. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+}
+
+/* Motion floor: honour the reader's preference. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.session-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text-subtle) 45%, transparent) transparent;
+}
+.session-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.session-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.session-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-subtle) 40%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.session-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--color-text-subtle) 65%, transparent);
+  background-clip: content-box;
+}
+
+/* Jumped-to exchange: a single pass of attention, then quiet. */
+@keyframes exchange-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--color-brand-500) 16%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.exchange-flash {
+  animation: exchange-flash 1.4s ease-out 1;
+}
+
+/* Find-in-conversation highlight. */
+mark.session-find {
+  background: color-mix(in srgb, var(--color-warning) 35%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+mark.session-find[data-active="true"] {
+  background: var(--color-warning);
+  color: #1a1a1a;
+}
+
+/* Loading skeleton for session rows. */
+@keyframes skeleton-sweep {
+  0% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.55;
+  }
+}
+.skeleton-row {
+  animation: skeleton-sweep 1.6s ease-in-out infinite;
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/shared/utils/cn";
 
 /* ------------------------------- formatting ------------------------------- */
@@ -142,6 +142,127 @@ export function Shimmer() {
   );
 }
 
+/** Clipboard helper with a short-lived "copied" flag. */
+export function useCopy() {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(async (value) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+  return { copied, copy };
+}
+
+/**
+ * Session minimap: one tick per exchange, height = duration, colour = outcome,
+ * amber underline = cache miss, pulsing tick while a request is in flight.
+ * Click a tick (or focus the strip and use ←/→) to jump to an exchange.
+ */
+export function SessionMinimap({ turns = [], spikeIds, liveEntry, activeIndex = null, onJump }) {
+  const ref = useRef(null);
+  const [width, setWidth] = useState(0);
+  const count = turns.length;
+  const maxDuration = Math.max(1, ...turns.map((turn) => turn.total || 0));
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver((entries) => {
+      const next = entries[0]?.contentRect?.width || 0;
+      setWidth((current) => (Math.abs(current - next) > 1 ? next : current));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const gap = 2;
+  const barWidth = count > 0 && width > 0 ? Math.max(2, Math.min(9, (width - gap * (count - 1) - 12) / count)) : 3;
+
+  const jumpTo = (index) => {
+    if (index >= 0 && index < count) onJump?.(index);
+  };
+
+  return (
+    <div className="flex min-w-0 items-center gap-3">
+      <MicroLabel className="shrink-0">exchanges</MicroLabel>
+      <div
+        ref={ref}
+        role="slider"
+        tabIndex={count > 0 ? 0 : -1}
+        aria-label="Session exchanges — click or use arrow keys to jump"
+        aria-valuemin={count > 0 ? 1 : 0}
+        aria-valuemax={count}
+        aria-valuenow={activeIndex !== null && activeIndex !== undefined ? activeIndex + 1 : undefined}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowRight") {
+            event.preventDefault();
+            jumpTo(Math.min(count - 1, (activeIndex ?? -1) + 1));
+          } else if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            jumpTo(Math.max(0, (activeIndex ?? 1) - 1));
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            jumpTo(activeIndex ?? 0);
+          }
+        }}
+        className="flex h-10 min-w-0 flex-1 items-end gap-[2px] overflow-hidden rounded-lg border border-border-subtle bg-surface-2/40 px-1.5 pb-1 pt-1.5"
+      >
+        {turns.map((turn, index) => {
+          const duration = turn.total || 0;
+          const height = 10 + (duration / maxDuration) * 22;
+          const failed = turn.status && !["ok", "success"].includes(turn.status);
+          const retried = !failed && (turn.routing?.attempts?.length || 0) > 0;
+          const cacheMiss = (turn.tokens?.input || 0) >= 2000 && !(turn.tokens?.cached || 0);
+          const spike = spikeIds?.has(turn.id);
+          const active = activeIndex === index;
+          return (
+            <button
+              key={turn.id || index}
+              type="button"
+              tabIndex={-1}
+              onClick={() => jumpTo(index)}
+              title={`#${index + 1} ${fmtClock(turn.timestamp)} · ${[turn.provider, turn.model].filter(Boolean).join("/")} · ${fmtDurationMs(duration)} · ${turn.tokens?.input ?? 0} in / ${turn.tokens?.output ?? 0} out${
+                failed ? " · failed" : retried ? ` · ${turn.routing.attempts.length} attempt(s)` : ""
+              }${cacheMiss ? " · no cache" : ""}`}
+              className="group relative flex shrink-0 items-end rounded-sm outline-offset-2"
+              style={{ width: barWidth }}
+            >
+              <span
+                className={cn(
+                  "w-full rounded-[2px] transition-transform group-hover:-translate-y-0.5",
+                  failed ? "bg-red-500/80" : retried ? "bg-amber-500/80" : "bg-emerald-500/75",
+                  active && "ring-2 ring-brand-500"
+                )}
+                style={{ height }}
+              />
+              {spike ? <span className="absolute -top-1 left-0 h-[2px] w-full rounded-full bg-warning" /> : null}
+              {cacheMiss ? <span className="absolute -bottom-1 left-0 h-[2px] w-full rounded-full bg-amber-600/80" /> : null}
+            </button>
+          );
+        })}
+        {liveEntry ? (
+          <span
+            className="mb-0.5 shrink-0 animate-pulse rounded-[2px] bg-sky-500/70"
+            style={{ width: barWidth, height: 30 }}
+            title="live exchange"
+          />
+        ) : null}
+        {count === 0 && !liveEntry ? (
+          <span className="pb-2 font-mono text-[10px] text-text-subtle">no exchanges yet</span>
+        ) : null}
+      </div>
+      <span className="shrink-0 font-mono text-[9.5px] tabular-nums text-text-subtle">
+        {liveEntry ? "live" : activeIndex !== null && activeIndex !== undefined ? `#${activeIndex + 1}` : count}
+      </span>
+    </div>
+  );
+}
+
 /* ------------------------------- rich text -------------------------------- */
 
 function splitCodeFences(text) {
@@ -158,7 +279,24 @@ function splitCodeFences(text) {
   return parts;
 }
 
-function renderInline(text, keyPrefix) {
+function highlightParts(text, query) {
+  if (!query) return [text];
+  const haystack = text.toLowerCase();
+  const needle = query.toLowerCase();
+  const parts = [];
+  let cursor = 0;
+  for (;;) {
+    const found = haystack.indexOf(needle, cursor);
+    if (found === -1) break;
+    if (found > cursor) parts.push(text.slice(cursor, found));
+    parts.push(text.slice(found, found + needle.length));
+    cursor = found + needle.length;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
+function renderInline(text, keyPrefix, query) {
   const tokens = String(text).split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
   return tokens.map((token, index) => {
     const key = `${keyPrefix}-${index}`;
@@ -176,11 +314,21 @@ function renderInline(text, keyPrefix) {
         </strong>
       );
     }
-    return <span key={key}>{token}</span>;
+    const parts = highlightParts(token, query);
+    if (parts.length === 1) return <span key={key}>{token}</span>;
+    return (
+      <span key={key}>
+        {parts.map((part, partIndex) => (
+          <mark key={partIndex} className={partIndex % 2 === 1 ? "session-find" : undefined}>
+            {part}
+          </mark>
+        ))}
+      </span>
+    );
   });
 }
 
-function TextLines({ text }) {
+function TextLines({ text, query }) {
   const nodes = [];
   let list = null;
   const flush = () => {
@@ -208,7 +356,7 @@ function TextLines({ text }) {
         flush();
         list = { type, items: [] };
       }
-      list.items.push(<li key={`li-${index}`}>{renderInline((bullet || numbered)[1], index)}</li>);
+      list.items.push(<li key={`li-${index}`}>{renderInline((bullet || numbered)[1], index, query)}</li>);
       return;
     }
     flush();
@@ -220,14 +368,14 @@ function TextLines({ text }) {
     if (heading) {
       nodes.push(
         <p key={`h-${index}`} className="pt-1 font-semibold text-text-main">
-          {renderInline(heading[2], index)}
+          {renderInline(heading[2], index, query)}
         </p>
       );
       return;
     }
     nodes.push(
       <p key={`p-${index}`} className="whitespace-pre-wrap [text-wrap:pretty]">
-        {renderInline(line, index)}
+        {renderInline(line, index, query)}
       </p>
     );
   });
@@ -235,7 +383,7 @@ function TextLines({ text }) {
   return <div className="flex flex-col gap-0.5">{nodes}</div>;
 }
 
-export function RichText({ text }) {
+export function RichText({ text, query = null }) {
   const blocks = useMemo(() => splitCodeFences(text || ""), [text]);
   if (!text) return null;
   return (
@@ -249,7 +397,7 @@ export function RichText({ text }) {
             <code>{block.text.replace(/\n$/, "")}</code>
           </pre>
         ) : (
-          <TextLines key={index} text={block.text} />
+          <TextLines key={index} text={block.text} query={query} />
         )
       )}
     </div>

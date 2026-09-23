@@ -20,7 +20,8 @@ import { cn } from "@/shared/utils/cn";
 import { fmtCompact, fmtCost } from "./format";
 import ChatView from "./sessions/ChatView";
 import TimelineView from "./sessions/TimelineView";
-import { MicroLabel, StatPill, fmtDurationMs, fmtTimeAgo } from "./sessions/primitives";
+import { MicroLabel, SessionMinimap, StatPill, fmtDurationMs, fmtTimeAgo } from "./sessions/primitives";
+import { fallbackCount } from "@/lib/usage/routingEvents";
 
 const VIEWS = [
   { value: "chat", label: "Chat" },
@@ -34,10 +35,19 @@ const FILTERS = [
   { value: "failing", label: "Failing" },
 ];
 
+const SORTS = [
+  { value: "recent", label: "Recent" },
+  { value: "spend", label: "Spend" },
+];
+
 const REFRESH_MS = 10000;
 
-/** Stable order: a session keeps its place while it receives new requests. */
-function orderedSessions(list) {
+/**
+ * "Recent" keeps a stable order (a session keeps its place while it receives
+ * new requests); "Spend" surfaces the expensive ones first.
+ */
+function orderedSessions(list, sort) {
+  if (sort === "spend") return [...list].sort((a, b) => (b.costUsd || 0) - (a.costUsd || 0));
   return [...list].sort((a, b) => {
     const left = new Date(a.startedAt || a.lastAt || 0).getTime() || 0;
     const right = new Date(b.startedAt || b.lastAt || 0).getTime() || 0;
@@ -57,6 +67,9 @@ export default function SessionsTab() {
   const [live, setLive] = useState(true);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
+  const [sort, setSort] = useState("recent");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [jumpRequest, setJumpRequest] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [expandedTurn, setExpandedTurn] = useState(null);
@@ -77,7 +90,7 @@ export default function SessionsTab() {
       const response = await fetch(`/api/usage/sessions?${params}`, { cache: "no-store" });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not load sessions");
-      setSessions(orderedSessions(payload.sessions || []));
+      setSessions(payload.sessions || []);
       setCounts(payload.counts || null);
       setError("");
       // Selection only falls back when nothing is chosen yet.
@@ -88,6 +101,18 @@ export default function SessionsTab() {
       setLoading(false);
     }
   }, [query, requestedSession]);
+
+  const listedSessions = useMemo(() => {
+    const filtered = sessions.filter((entry) => {
+      if (filter === "live") return entry.live || entry.generating;
+      if (filter === "watched") return entry.monitored;
+      if (filter === "failing") return (entry.failures || 0) > 0;
+      return true;
+    });
+    return orderedSessions(filtered, sort);
+  }, [sessions, filter, sort]);
+
+  const maxListCost = useMemo(() => Math.max(0, ...listedSessions.map((entry) => entry.costUsd || 0)), [listedSessions]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -107,12 +132,7 @@ export default function SessionsTab() {
     if (requestedSession) setSelectedId(requestedSession);
   }, [requestedSession]);
 
-  const visibleSessions = useMemo(() => {
-    if (filter === "live") return sessions.filter((entry) => entry.live || entry.generating);
-    if (filter === "watched") return sessions.filter((entry) => entry.monitored);
-    if (filter === "failing") return sessions.filter((entry) => (entry.failures || 0) > 0);
-    return sessions;
-  }, [sessions, filter]);
+
 
   /* ----------------------------- session detail ---------------------------- */
 
@@ -125,6 +145,8 @@ export default function SessionsTab() {
     setOpenRoutes({});
     setBudgetDraft({ cost: "", tokens: "" });
     setContent(null);
+    setActiveIndex(0);
+    setJumpRequest(null);
 
     if (!live) {
       let cancelled = false;
@@ -227,10 +249,47 @@ export default function SessionsTab() {
   }, [turns]);
 
   const liveEntry = useMemo(() => (content?.live || []).find((entry) => entry.status === "streaming") || null, [content]);
+
   const routing = session?.routing || null;
   const summary = session?.summary || null;
   const budget = session?.budget || null;
   const cacheRate = summary?.tokens ? Math.round(((summary.cachedTokens || 0) / summary.tokens) * 100) : null;
+
+  /** Session-level answers to "where did the tokens and the cache go?". */
+  const insights = useMemo(() => {
+    if (turns.length === 0) return [];
+    const notes = [];
+    const cacheMisses = turns.filter((turn) => (turn.tokens.input || 0) >= 2000 && !(turn.tokens.cached || 0));
+    if (cacheMisses.length > 0) {
+      const tokens = cacheMisses.reduce((sum, turn) => sum + (turn.tokens.input || 0), 0);
+      notes.push({
+        icon: "cached",
+        tone: "warning",
+        text: `${cacheMisses.length} exchange${cacheMisses.length === 1 ? "" : "s"} ran without cache — ${fmtCompact(tokens)} input tokens billed in full`,
+      });
+    }
+    const firstInput = turns[0]?.tokens?.input || 0;
+    const lastInput = turns[turns.length - 1]?.tokens?.input || 0;
+    if (firstInput > 500 && lastInput > firstInput * 2) {
+      notes.push({
+        icon: "data_usage",
+        tone: "info",
+        text: `context grew ${(lastInput / firstInput).toFixed(1)}× (${fmtCompact(firstInput)} → ${fmtCompact(lastInput)} in)`,
+      });
+    }
+    const retried = turns.filter((turn) => fallbackCount(turn.routing) > 0).length;
+    if (retried > 0) {
+      notes.push({
+        icon: "restart_alt",
+        tone: "warning",
+        text: `${retried} exchange${retried === 1 ? "" : "s"} needed retries (${routing?.fallbacks ?? 0} fallbacks)`,
+      });
+    }
+    const slow = turns.filter((turn) => (turn.ttft || 0) > 10000).length;
+    if (slow > 0) notes.push({ icon: "timer", tone: "info", text: `${slow} exchange${slow === 1 ? "" : "s"} waited over 10s for the first token` });
+    if (summary?.failures) notes.push({ icon: "error", tone: "danger", text: `${summary.failures} exchange${summary.failures === 1 ? "" : "s"} failed` });
+    return notes;
+  }, [turns, routing, summary]);
 
   /* -------------------------------- actions -------------------------------- */
 
@@ -313,7 +372,8 @@ export default function SessionsTab() {
               />
             </label>
             <div className="flex flex-wrap items-center gap-1">
-              {FILTERS.map((option) => (
+              <span className="mr-auto flex items-center gap-1">
+                {FILTERS.map((option) => (
                 <button
                   key={option.value}
                   type="button"
@@ -326,15 +386,24 @@ export default function SessionsTab() {
                   )}
                 >
                   {option.label}
-                </button>
-              ))}
+                  </button>
+                ))}
+              </span>
+              <SegmentedControl options={SORTS} value={sort} onChange={setSort} size="sm" />
             </div>
           </div>
 
-          <div className="flex max-h-[calc(100vh-260px)] min-h-[240px] flex-col overflow-y-auto overscroll-contain">
+          <div className="session-scroll flex max-h-[calc(100vh-260px)] min-h-[240px] flex-col overflow-y-auto overscroll-contain">
             {loading && sessions.length === 0 ? (
-              <p className="p-4 text-center font-mono text-[10px] text-text-subtle">loading sessions…</p>
-            ) : visibleSessions.length === 0 ? (
+              <div className="flex flex-col">
+                {[0, 1, 2, 3].map((row) => (
+                  <div key={row} className="skeleton-row flex flex-col gap-2 border-b border-border-subtle px-3 py-3">
+                    <span className="h-2.5 w-2/3 rounded-full bg-surface-2" />
+                    <span className="h-2 w-1/2 rounded-full bg-surface-2" />
+                  </div>
+                ))}
+              </div>
+            ) : listedSessions.length === 0 ? (
               <div className="flex flex-col gap-1 p-4 text-center">
                 <span className="material-symbols-outlined text-[22px] text-text-subtle">forum</span>
                 <p className="text-xs text-text-muted">
@@ -342,7 +411,7 @@ export default function SessionsTab() {
                 </p>
               </div>
             ) : (
-              visibleSessions.map((entry) => {
+              listedSessions.map((entry) => {
                 const selected = selectedId === entry.id;
                 return (
                   <button
@@ -386,6 +455,14 @@ export default function SessionsTab() {
                       <span>· {fmtCost(entry.costUsd)}</span>
                       {entry.failures > 0 ? <span className="text-danger">· {entry.failures} failed</span> : null}
                     </span>
+                    {maxListCost > 0 && entry.costUsd > 0 ? (
+                      <span className="mt-0.5 block h-[2px] w-full overflow-hidden rounded-full bg-surface-2" title={fmtCost(entry.costUsd)}>
+                        <span
+                          className="block h-full rounded-full bg-brand-500/60"
+                          style={{ width: `${Math.max(2, (entry.costUsd / maxListCost) * 100)}%` }}
+                        />
+                      </span>
+                    ) : null}
                   </button>
                 );
               })
@@ -491,7 +568,41 @@ export default function SessionsTab() {
                     </span>
                   ) : null}
                 </div>
+
+                {turns.length > 0 || liveEntry ? (
+                  <SessionMinimap
+                    turns={turns}
+                    spikeIds={spikeIds}
+                    liveEntry={liveEntry}
+                    activeIndex={turns.length ? Math.min(activeIndex, turns.length - 1) : null}
+                    onJump={(index) => {
+                      setActiveIndex(index);
+                      setJumpRequest({ index, nonce: Date.now() });
+                    }}
+                  />
+                ) : null}
               </div>
+
+              {insights.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-1.5 border-b border-border-subtle px-4 py-1.5">
+                  {insights.map((note, index) => (
+                    <span
+                      key={index}
+                      className={cn(
+                        "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] leading-relaxed",
+                        note.tone === "danger"
+                          ? "bg-danger/8 text-danger"
+                          : note.tone === "warning"
+                            ? "bg-warning/10 text-warning"
+                            : "bg-surface-2 text-text-muted"
+                      )}
+                    >
+                      <span className="material-symbols-outlined text-[11px]">{note.icon}</span>
+                      {note.text}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
 
               {/* Views */}
               <div className="min-w-0 p-3">
@@ -504,7 +615,9 @@ export default function SessionsTab() {
                     openRoutes={openRoutes}
                     onToggleRoute={toggleRoute}
                     now={now}
-                    maxCost={maxCost}
+                    jumpRequest={jumpRequest}
+                    activeIndex={activeIndex}
+                    onActiveIndex={setActiveIndex}
                   />
                 ) : (
                   <TimelineView
@@ -519,6 +632,8 @@ export default function SessionsTab() {
                     maxCost={maxCost}
                     liveEntry={liveEntry}
                     now={now}
+                    jumpRequest={jumpRequest}
+                    onActiveIndex={setActiveIndex}
                   />
                 )}
               </div>
