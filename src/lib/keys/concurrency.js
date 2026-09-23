@@ -43,6 +43,18 @@ if (!globalStore._keyRateWindows) {
   globalStore._keyRateWindows = new Map();
 }
 const rateWindows = globalStore._keyRateWindows;
+
+/** Reset in-flight counters and rate windows for every key. */
+export function clearKeyRuntimeState() {
+  const removed = counters.size + rateWindows.size;
+  counters.clear();
+  rateWindows.clear();
+  return removed;
+}
+
+export function keyRuntimeSize() {
+  return counters.size + rateWindows.size;
+}
 const WINDOW_MS = 60 * 60 * 1000;
 
 /** Record a request start so RPM/RPH limits see bursts before DB rows land. */

@@ -63,6 +63,8 @@ export function registerSessionStart({ sessionId, liveKey, provider, model, labe
 }
 
 export function listLiveSessions({ withinMs = MAX_AGE_MS } = {}) {
+
+
   const now = Date.now();
   prune(now);
   return [...entries.values()]
@@ -85,3 +87,15 @@ export function findGeneratingSession({ sessionId, liveKey } = {}) {
   }
   return null;
 }
+
+/** Drop the in-flight session registry (stale "live" rows disappear). */
+export function clearLiveSessions() {
+  const removed = entries.size;
+  entries.clear();
+  return removed;
+}
+
+export function liveSessionCount() {
+  return entries.size;
+}
+

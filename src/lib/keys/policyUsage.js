@@ -24,6 +24,17 @@ const PERIOD_MS = {
 const SUCCESS_STATUSES = ["ok", "success"];
 
 const quotaCache = new Map(); // provider -> { at, data }
+
+/** Drop cached provider quota snapshots (they refetch on demand). */
+export function clearProviderQuotaCache() {
+  const removed = quotaCache.size;
+  quotaCache.clear();
+  return removed;
+}
+
+export function providerQuotaCacheSize() {
+  return quotaCache.size;
+}
 const QUOTA_TTL_MS = 5 * 60 * 1000;
 const QUOTA_TIMEOUT_MS = 5000;
 

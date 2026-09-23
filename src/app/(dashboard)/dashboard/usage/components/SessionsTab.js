@@ -79,7 +79,27 @@ export default function SessionsTab() {
   const [budgetSaving, setBudgetSaving] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [spendOpen, setSpendOpen] = useState(false);
+  const [paneHeight, setPaneHeight] = useState(null);
   const eventSourceRef = useRef(null);
+  const rootRef = useRef(null);
+
+  // Fill the viewport on desktop so only the inner panes scroll (no double
+  // scrollbar); on small screens the page scrolls as usual.
+  useEffect(() => {
+    const measure = () => {
+      const el = rootRef.current;
+      if (!el) return;
+      if (window.innerWidth < 1024) {
+        setPaneHeight(null);
+        return;
+      }
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      setPaneHeight(Math.max(460, Math.floor(window.innerHeight - top - 16)));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
 
   /* ------------------------------- session list ---------------------------- */
 
@@ -335,7 +355,11 @@ export default function SessionsTab() {
   /* --------------------------------- render -------------------------------- */
 
   return (
-    <div className="flex min-w-0 flex-col gap-4">
+    <div
+      ref={rootRef}
+      style={paneHeight ? { height: `${paneHeight}px` } : undefined}
+      className={cn("flex min-w-0 flex-col gap-4", paneHeight && "overflow-hidden")}
+    >
       <header className="flex flex-wrap items-end justify-between gap-2">
         <div>
           <h2 className="text-[15px] font-semibold text-text-main">Sessions</h2>
@@ -356,9 +380,9 @@ export default function SessionsTab() {
 
       {error ? <p className="rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">{error}</p> : null}
 
-      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(272px,320px)_minmax(0,1fr)]">
+      <div className="grid min-w-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(272px,320px)_minmax(0,1fr)] lg:overflow-hidden">
         {/* Session list */}
-        <Card padding="none" className="flex min-w-0 flex-col overflow-hidden">
+        <Card padding="none" className="flex min-h-0 min-w-0 flex-col overflow-hidden">
           <div className="flex flex-col gap-2 border-b border-border-subtle px-3 py-2.5">
             <label className="relative block">
               <span className="material-symbols-outlined pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[15px] text-text-subtle">
@@ -393,7 +417,7 @@ export default function SessionsTab() {
             </div>
           </div>
 
-          <div className="session-scroll flex max-h-[calc(100vh-260px)] min-h-[240px] flex-col overflow-y-auto overscroll-contain">
+          <div className="session-scroll flex min-h-[240px] flex-1 flex-col overflow-y-auto overscroll-contain">
             {loading && sessions.length === 0 ? (
               <div className="flex flex-col">
                 {[0, 1, 2, 3].map((row) => (
@@ -471,7 +495,7 @@ export default function SessionsTab() {
         </Card>
 
         {/* Session detail */}
-        <Card padding="none" className="flex min-w-0 flex-col">
+        <Card padding="none" className="flex min-h-0 min-w-0 flex-col overflow-hidden">
           {!session ? (
             <div className="flex min-h-[320px] flex-col items-center justify-center gap-2 px-6 py-16 text-center">
               <span className="material-symbols-outlined text-[24px] text-text-subtle">conversion_path</span>
@@ -605,7 +629,7 @@ export default function SessionsTab() {
               ) : null}
 
               {/* Views */}
-              <div className="min-w-0 p-3">
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col p-3">
                 {view === "chat" ? (
                   <ChatView
                     key={session.id}
@@ -662,7 +686,7 @@ export default function SessionsTab() {
                 </button>
 
                 {spendOpen ? (
-                  <div className="grid min-w-0 gap-3 pt-2 lg:grid-cols-[minmax(0,1fr)_minmax(220px,260px)]">
+                  <div className="session-scroll grid min-w-0 gap-3 overflow-y-auto pt-2 lg:max-h-[42vh] lg:grid-cols-[minmax(0,1fr)_minmax(220px,260px)]">
                     <div className="min-w-0 rounded-xl border border-border-subtle bg-bg p-2.5">
                       <div className="mb-1 flex items-center justify-between">
                         <MicroLabel>cumulative spend</MicroLabel>

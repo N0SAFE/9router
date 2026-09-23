@@ -7,6 +7,17 @@ const FAIL_WINDOW_MS = 60 * 60 * 1000; // 1h since last fail → auto reset
 
 const attempts = new Map(); // ip → { fails, lockUntil, lockLevel, lastFailAt }
 
+/** Clear every sign-in lockout (unlocks locked-out clients). */
+export function clearLoginLockouts() {
+  const removed = attempts.size;
+  attempts.clear();
+  return removed;
+}
+
+export function loginLockoutSize() {
+  return attempts.size;
+}
+
 function now() { return Date.now(); }
 
 function getEntry(ip) {

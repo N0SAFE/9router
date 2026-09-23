@@ -18,7 +18,7 @@ import TurnMetrics from "./TurnMetrics";
 import { buildTranscript } from "./transcript";
 
 const VISIBLE_TURNS = 120;
-const CONTEXT_PREFIX = /^\s*(?:<([a-z_][a-z0-9_]*)>[\s\S]*?<\/\1>\s*)+/i;
+const CONTEXT_PREFIX = /^\s*(?:<([a-z_][a-z0-9_-]*)>[\s\S]*?<\/\1>\s*)+/i;
 
 /* ------------------------------ message atoms ----------------------------- */
 
@@ -597,7 +597,7 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
   const query = find.trim() || null;
 
   return (
-    <section className="relative flex min-w-0 flex-col overflow-hidden rounded-[var(--radius-brand-lg)] border border-border bg-bg">
+    <section className="relative flex min-h-[320px] min-w-0 flex-1 flex-col overflow-hidden rounded-[var(--radius-brand-lg)] border border-border bg-bg">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border bg-surface/60 px-4 py-2">
         <MicroLabel>conversation</MicroLabel>
         <span className="font-mono text-[10px] tabular-nums text-text-subtle">
@@ -694,7 +694,7 @@ export default function ChatView({ session, turns, content, openRoutes, onToggle
         onScroll={handleScroll}
         onKeyDown={handleKeyDown}
         tabIndex={0}
-        className="session-scroll flex max-h-[min(72vh,780px)] min-h-[320px] flex-col overflow-y-auto overscroll-contain outline-none"
+        className="session-scroll flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain outline-none"
       >
         {problemsOnly ? (
           <p className="border-b border-border bg-warning/5 px-4 py-1.5 font-mono text-[10px] text-warning">

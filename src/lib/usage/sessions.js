@@ -71,7 +71,7 @@ export function splitUserContent(message) {
   return { text: textParts.filter(Boolean).join("\n").trim(), toolResults };
 }
 
-const CONTEXT_BLOCK = /^\s*(?:<([a-z_][a-z0-9_]*)>[\s\S]*?<\/\1>\s*)+/i;
+const CONTEXT_BLOCK = /^\s*(?:<([a-z_][a-z0-9_-]*)>[\s\S]*?<\/\1>\s*)+/i;
 
 /** Drop leading environment/context blocks: they are injected, not user text. */
 export function stripContextBlocks(text) {
@@ -81,6 +81,10 @@ export function stripContextBlocks(text) {
     if (!match) break;
     value = value.slice(match[0].length);
   }
+  // Stored payloads are truncated, so a context block can arrive without its
+  // closing tag: drop the opener anyway.
+  const unclosed = /^\s*<([a-z_][a-z0-9_-]*)>([\s\S]*)$/i.exec(value);
+  if (unclosed) value = unclosed[2];
   return value;
 }
 
@@ -467,7 +471,16 @@ function firstUserMessage(detail) {
   return messageText(user);
 }
 
-const LABEL_NOISE = [/^<environment_info>/i, /^<system/i, /^<[a-z_]+>[\s\S]*<\/[a-z_]+>$/i];
+const LABEL_NOISE = [
+  /^<environment_info>/i,
+  /^<system/i,
+  /^<[a-z_]+>[\s\S]*<\/[a-z_]+>$/i,
+  // Harness context blocks (often truncated, so match on the opening line).
+  /^<[a-z_][a-z0-9_-]*>/i,
+  /^i am working in a workspace/i,
+  /^the user'?s current (os|operating system)/i,
+  /^terminals?:\s*$/im,
+];
 const NOISE_BLOCK = /<([a-z_]+)>[\s\S]*?<\/\1>/gi;
 
 /**

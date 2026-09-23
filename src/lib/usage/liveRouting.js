@@ -173,6 +173,8 @@ export function finishLiveRequest(id, { status = "completed", provider = null, m
 }
 
 export function getLiveRequest(id) {
+
+
   prune();
   return requests.get(id) || null;
 }
@@ -184,3 +186,15 @@ export function listLiveRequests({ withinMs = KEEP_FINISHED_MS } = {}) {
     .filter((entry) => !entry.finishedAt || now - entry.finishedAtMs <= withinMs)
     .sort((a, b) => b.startedAtMs - a.startedAtMs);
 }
+
+/** Drop the live routing traces. */
+export function clearLiveRequests() {
+  const removed = requests.size;
+  requests.clear();
+  return removed;
+}
+
+export function liveRequestCount() {
+  return requests.size;
+}
+

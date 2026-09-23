@@ -13,6 +13,17 @@ import { CLOUD_CODE_API, LOAD_CODE_ASSIST_HEADERS, ANTIGRAVITY_LOAD_CODE_ASSIST_
 // connectionId -> { projectId: string, fetchedAt: number }
 const projectIdCache = new Map();
 
+/** Drop resolved cloud project ids (they are re-resolved on the next request). */
+export function clearProjectIdCache() {
+  const removed = projectIdCache.size;
+  projectIdCache.clear();
+  return removed;
+}
+
+export function projectIdCacheSize() {
+  return projectIdCache.size;
+}
+
 /** How long a cached project ID is considered fresh (1 hour). */
 const CACHE_TTL_MS = 60 * 60 * 1000;
 

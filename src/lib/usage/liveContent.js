@@ -135,6 +135,20 @@ detailsEmitter.on("detail", (record) => {
 });
 
 export function listLiveContent() {
+
+
   prune();
   return [...turns.values()].sort((a, b) => a.startedAt - b.startedAt);
 }
+
+/** Drop the live message/content registry. */
+export function clearLiveTurns() {
+  const removed = turns.size;
+  turns.clear();
+  return removed;
+}
+
+export function liveTurnCount() {
+  return turns.size;
+}
+

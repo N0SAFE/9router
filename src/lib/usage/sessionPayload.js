@@ -206,7 +206,9 @@ export async function listExplicitSessions(limit = 200) {
           : Array.isArray(user?.content)
             ? user.content.map((part) => part?.text || "").join(" ")
             : "";
-        if (text) labels[row.sessionId] = sanitizeLabel(text) || text.slice(0, 96);
+        // Noise-only messages must not become labels: skip and let the model fallback win.
+        const label = text ? sanitizeLabel(text) : null;
+        if (label) labels[row.sessionId] = label;
       } catch {
         // ignore malformed rows
       }

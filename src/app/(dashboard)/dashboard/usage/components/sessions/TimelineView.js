@@ -61,7 +61,7 @@ export default function TimelineView({
     timelineMode === "relative" ? 0 : Math.min(100, Math.max(0, ((liveOffset || 0) / (timeline?.span || 1)) * 100));
 
   return (
-    <section className="flex min-w-0 flex-col overflow-hidden rounded-[var(--radius-brand-lg)] border border-border bg-bg">
+    <section className="flex min-h-[320px] min-w-0 flex-1 flex-col overflow-hidden rounded-[var(--radius-brand-lg)] border border-border bg-bg">
       <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface/60 px-4 py-2">
         <MicroLabel>waterfall</MicroLabel>
         <span className="font-mono text-[10px] tabular-nums text-text-subtle">
@@ -111,7 +111,7 @@ export default function TimelineView({
         </span>
       </div>
 
-      <div ref={scrollRef} className="session-scroll max-h-[min(72vh,780px)] min-w-0 overflow-y-auto overscroll-contain">
+      <div ref={scrollRef} className="session-scroll min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
         {turns.length === 0 ? (
           <p className="px-4 py-10 text-center text-xs text-text-muted">No completed exchanges yet.</p>
         ) : null}
