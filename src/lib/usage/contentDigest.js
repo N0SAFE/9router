@@ -1,7 +1,7 @@
 /**
  * Compact, readable digest of a stored request/response payload.
  *
- * Full bodies are truncated to `observabilityMaxJsonSize` (default 5 KB) before
+ * Full bodies are truncated to `observabilityMaxJsonSize` (default 64 KB) before
  * they are stored, and the API redacts them wholesale for privacy. This module
  * builds a bounded preview instead: message roles, sizes and short text
  * snippets, tool names, and the response head/tail — enough to see what a

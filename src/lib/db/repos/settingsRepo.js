@@ -43,7 +43,7 @@ const DEFAULT_SETTINGS = {
   observabilityMaxRecords: 1000,
   observabilityBatchSize: 20,
   observabilityFlushIntervalMs: 5000,
-  observabilityMaxJsonSize: 5,
+  observabilityMaxJsonSize: 64,
   // "digest" (default) exposes bounded previews (roles, sizes, short snippets)
   // in the Usage detail drawer; "none" keeps payloads fully redacted.
   observabilityContentMode: "digest",

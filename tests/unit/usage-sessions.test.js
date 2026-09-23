@@ -4,6 +4,7 @@ import {
   buildSessionTurns,
   detectSpikes,
   groupImplicitSessions,
+  lastRealUserText,
   sessionIdOf,
   summarizeSession,
 } from "../../src/lib/usage/sessions.js";
@@ -265,5 +266,114 @@ describe("tool calls and tool results", () => {
     const turns = buildSessionTurns(details);
     expect(turns[0].userMessages.map((message) => message.text)).toEqual(["ping"]);
     expect(turns[0].toolMessages.map((message) => message.text)).toEqual(["orphan tool output"]);
+  });
+
+  it("hides context-only user messages entirely", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T15:00:00Z",
+        {
+          messages: [
+            {
+              role: "user",
+              content: "<context>\nThe current date is 2026-09-23.\nTerminals: zsh\n</context>",
+            },
+          ],
+        },
+        { content: "ok" }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].userMessages).toHaveLength(0);
+    expect(turns[0].toolMessages).toHaveLength(0);
+  });
+
+  it("treats plain-text tool output after a tool call as a tool result", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T16:00:00Z",
+        { messages: [{ role: "user", content: "run the typechecks" }] },
+        { content: "[Empty streaming response]", toolCalls: [{ name: "run_in_terminal", arguments: '{"command":"bun type-check"}' }] }
+      ),
+      base(
+        "d2",
+        "2026-01-01T16:00:04Z",
+        {
+          messages: [
+            { role: "user", content: "run the typechecks" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [{ id: "call_1", function: { name: "run_in_terminal", arguments: '{"command":"bun type-check"}' } }],
+            },
+            {
+              role: "user",
+              content: "<context>\nThe current date is 2026-09-23.\nTerminals: zsh\n</context>\n\napi=0\nsetup=1\nlifecycle=0",
+            },
+          ],
+        },
+        { content: "typechecks done" }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].toolCalls[0].result).toContain("api=0");
+    expect(turns[1].userMessages).toHaveLength(0);
+    expect(turns[1].toolMessages).toHaveLength(0);
+    expect(turns[1].assistant.content).toBe("typechecks done");
+  });
+
+  it("keeps real user text that follows a context block", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T17:00:00Z",
+        {
+          messages: [
+            {
+              role: "user",
+              content: "<context>\nignored preamble\n</context>\n\nplease fix the failing test",
+            },
+          ],
+        },
+        { content: "on it" }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].userMessages).toHaveLength(1);
+    expect(turns[0].userMessages[0].text).toContain("fix the failing test");
+    expect(lastRealUserText([{ role: "user", content: "<context>x</context>" }])).toBeNull();
+    expect(lastRealUserText([{ role: "user", content: "<context>x</context>\n\nreal ask" }])).toContain("real ask");
+  });
+
+  it("treats text after an empty tool placeholder row as the tool result", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T18:00:00Z",
+        {
+          messages: [
+            { role: "system", content: "agent prompt" },
+            { role: "user", content: "run the typechecks" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [{ id: "call_1", function: { name: "run_in_terminal", arguments: "{}" } }],
+            },
+            { role: "tool", tool_call_id: "call_1", content: "" },
+            { role: "user", content: "<context>\nTerminals: zsh\n</context>\n\napi=0\nsetup=1" },
+          ],
+        },
+        { content: "done" }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].userMessages.map((message) => message.text)).toEqual(["run the typechecks"]);
+    expect(turns[0].toolMessages.map((message) => message.text)).toEqual(["api=0\nsetup=1"]);
   });
 });

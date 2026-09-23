@@ -13,7 +13,7 @@ export const detailsEmitter = global._detailsEmitter;
 const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
-const DEFAULT_MAX_JSON_SIZE = 5 * 1024;
+const DEFAULT_MAX_JSON_SIZE = 64 * 1024;
 const CONFIG_CACHE_TTL_MS = 5000;
 
 let cachedConfig = null;
@@ -32,7 +32,7 @@ async function getObservabilityConfig() {
         maxRecords: settings.observabilityMaxRecords || parseInt(process.env.OBSERVABILITY_MAX_RECORDS || String(DEFAULT_MAX_RECORDS), 10),
         batchSize: settings.observabilityBatchSize || parseInt(process.env.OBSERVABILITY_BATCH_SIZE || String(DEFAULT_BATCH_SIZE), 10),
         flushIntervalMs: settings.observabilityFlushIntervalMs || parseInt(process.env.OBSERVABILITY_FLUSH_INTERVAL_MS || String(DEFAULT_FLUSH_INTERVAL_MS), 10),
-        maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "5", 10)) * 1024,
+        maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "64", 10)) * 1024,
       };
       cachedConfigTs = Date.now();
       return cachedConfig;
@@ -48,7 +48,7 @@ async function getObservabilityConfig() {
       maxRecords: settings.observabilityMaxRecords || parseInt(process.env.OBSERVABILITY_MAX_RECORDS || String(DEFAULT_MAX_RECORDS), 10),
       batchSize: settings.observabilityBatchSize || parseInt(process.env.OBSERVABILITY_BATCH_SIZE || String(DEFAULT_BATCH_SIZE), 10),
       flushIntervalMs: settings.observabilityFlushIntervalMs || parseInt(process.env.OBSERVABILITY_FLUSH_INTERVAL_MS || String(DEFAULT_FLUSH_INTERVAL_MS), 10),
-      maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "5", 10)) * 1024,
+      maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "64", 10)) * 1024,
     };
   } catch {
     cachedConfig = {
@@ -94,6 +94,75 @@ function truncateField(obj, maxSize) {
   return obj || {};
 }
 
+function capContent(content, cap) {
+  if (typeof content === "string") {
+    return content.length > cap ? `${content.slice(0, cap)}…[truncated]` : content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === "string") return capContent(part, cap);
+      if (!part || typeof part !== "object") return part;
+      if (part.type === "text" && typeof part.text === "string") {
+        return { ...part, text: part.text.length > cap ? `${part.text.slice(0, cap)}…[truncated]` : part.text };
+      }
+      if (part.type === "tool_result") return { ...part, content: capContent(part.content, cap) };
+      if (part.type === "image" || part.type === "image_url") return { type: part.type, truncated: true };
+      return part;
+    });
+  }
+  return content;
+}
+
+function buildSlimRequest(request, cap, originalSize) {
+  const { messages, ...rest } = request || {};
+  delete rest.tools;
+  delete rest.functions;
+  return {
+    ...rest,
+    ...(Array.isArray(messages)
+      ? {
+          messages: messages.map((message) => ({
+            role: message?.role,
+            ...(message?.name ? { name: message.name } : {}),
+            ...(message?.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+            ...(Array.isArray(message?.tool_calls)
+              ? {
+                  tool_calls: message.tool_calls.map((call) => ({
+                    id: call?.id || null,
+                    function: {
+                      name: call?.function?.name || call?.name || null,
+                      arguments:
+                        typeof call?.function?.arguments === "string"
+                          ? call.function.arguments.slice(0, 1000)
+                          : call?.function?.arguments ?? null,
+                    },
+                  })),
+                }
+              : {}),
+            ...(message?.content !== undefined ? { content: capContent(message.content, cap) } : {}),
+          })),
+        }
+      : {}),
+    _truncated: true,
+    _originalSize: originalSize,
+  };
+}
+
+/**
+ * Requests over the storage cap used to be dropped wholesale (only a 200-char
+ * preview survived), which left the chat unable to show the user's message or
+ * the tool results. Keep the messages instead, with capped text.
+ */
+export function slimRequest(request, maxSize) {
+  const str = JSON.stringify(request || {});
+  if (str.length <= maxSize) return request || {};
+  for (const cap of [4000, 1000, 250]) {
+    const slim = buildSlimRequest(request, cap, str.length);
+    if (JSON.stringify(slim).length <= maxSize) return slim;
+  }
+  return buildSlimRequest(request, 120, str.length);
+}
+
 async function flushToDatabase() {
   if (isFlushing) return;
   if (writeBuffer.length === 0) return;
@@ -128,7 +197,7 @@ async function flushToDatabase() {
             sessionId,
             latency: item.latency || {},
             tokens: item.tokens || {},
-            request: truncateField(item.request, config.maxJsonSize),
+            request: slimRequest(item.request, config.maxJsonSize),
             providerRequest: truncateField(item.providerRequest, config.maxJsonSize),
             providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
             response: truncateField(item.response, config.maxJsonSize),

@@ -59,7 +59,7 @@ import { isConnectionAllowed } from "@/lib/keys/policy.js";
 import { registerSessionStart } from "@/lib/usage/liveSessions.js";
 import { finishLiveRequest, pushRoutingEvent, startLiveRequest } from "@/lib/usage/liveRouting.js";
 import { finishContentTurn, startLiveTurn } from "@/lib/usage/liveContent.js";
-import { liveKeyForRequest, sanitizeLabel } from "@/lib/usage/sessions.js";
+import { lastRealUserText, liveKeyForRequest, sanitizeLabel } from "@/lib/usage/sessions.js";
 
 /**
  * Handle chat completion request
@@ -213,12 +213,9 @@ export async function handleChat(request, clientRawRequest = null) {
       apiKey,
       label: sanitizeLabel(firstText),
     });
-    const lastUser = [...messages].reverse().find((message) => message?.role === "user");
-    const lastUserText = typeof lastUser?.content === "string"
-      ? lastUser.content
-      : Array.isArray(lastUser?.content)
-        ? lastUser.content.map((part) => part?.text || "").join(" ")
-        : "";
+    // Only a real user message belongs in the chat: context blocks and tool
+    // output sent as plain user messages are not shown as user bubbles.
+    const lastUserText = lastRealUserText(messages) || "";
     startLiveTurn({
       requestId: liveRequestId,
       sessionId: explicitSessionId,

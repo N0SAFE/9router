@@ -71,29 +71,79 @@ export function splitUserContent(message) {
   return { text: textParts.filter(Boolean).join("\n").trim(), toolResults };
 }
 
-/** Real user messages only: never tool results, never injected system prompts. */
-function extractUserMessages(messages = []) {
-  const userMessages = [];
-  for (const message of messages) {
-    if (message?.role !== "user") continue;
-    const { text } = splitUserContent(message);
-    if (text) userMessages.push({ role: "user", text });
+const CONTEXT_BLOCK = /^\s*(?:<([a-z_][a-z0-9_]*)>[\s\S]*?<\/\1>\s*)+/i;
+
+/** Drop leading environment/context blocks: they are injected, not user text. */
+export function stripContextBlocks(text) {
+  let value = String(text || "");
+  for (;;) {
+    const match = CONTEXT_BLOCK.exec(value);
+    if (!match) break;
+    value = value.slice(match[0].length);
   }
-  return userMessages;
+  return value;
 }
 
-/** Tool results in a message batch, in order (role:tool + tool_result parts). */
-function extractToolResults(messages = []) {
-  const results = [];
+/** User text without injected context blocks. */
+export function cleanUserText(text) {
+  return stripContextBlocks(text).trim();
+}
+
+function isToolCallMessage(message) {
+  return message?.role === "assistant" && Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
+}
+
+/**
+ * Walk a message batch and split it the way a chat client shows it: real user
+ * messages on one side, tool results (structured or plain-text replies to a
+ * tool call) on the other.
+ */
+function classifyMessages(messages = []) {
+  const userMessages = [];
+  const toolResults = [];
+  // True while a tool output is expected: right after a tool call, or after an
+  // empty tool placeholder row (some clients emit one before the real output).
+  let expectingToolOutput = false;
+
   for (const message of messages) {
     if (TOOL_ROLES.has(message?.role)) {
-      results.push({ text: messageText(message).slice(0, 4000), name: message?.name || null, id: message?.tool_call_id || null });
+      const text = messageText(message).slice(0, 4000);
+      if (text) {
+        toolResults.push({ text, name: message?.name || null, id: message?.tool_call_id || null });
+        expectingToolOutput = false;
+      } else {
+        // Placeholder row: the real output usually follows as a user message.
+        expectingToolOutput = true;
+      }
       continue;
     }
-    if (message?.role !== "user") continue;
-    results.push(...splitUserContent(message).toolResults);
+    if (message?.role === "user") {
+      const { text, toolResults: parts } = splitUserContent(message);
+      for (const part of parts) toolResults.push(part);
+      const cleaned = cleanUserText(text);
+      if (cleaned) {
+        if (expectingToolOutput && parts.length === 0) {
+          // Clients with no tool role send the tool output as a plain user
+          // message after the call: it is a result, not the user.
+          toolResults.push({ text: cleaned.slice(0, 4000), name: null, id: message?.tool_call_id || null });
+        } else {
+          // Keep the raw text: the UI collapses leading context blocks itself.
+          userMessages.push({ role: "user", text: text.trim() });
+        }
+      }
+      expectingToolOutput = false;
+      continue;
+    }
+    expectingToolOutput = isToolCallMessage(message);
   }
-  return results;
+
+  return { userMessages, toolResults };
+}
+
+/** Last real user message in a request (never context blocks or tool output). */
+export function lastRealUserText(messages = []) {
+  const { userMessages } = classifyMessages(messages);
+  return userMessages.length > 0 ? userMessages[userMessages.length - 1].text : null;
 }
 
 function messageSignature(message) {
@@ -251,8 +301,9 @@ export function buildSessionTurns(details = []) {
       if (position >= previous.length) return true;
       return messageSignature(message) !== messageSignature(previous[position]);
     });
-    // Extract once: the same result objects are later marked as consumed.
-    return { messages, fresh, results: extractToolResults(fresh) };
+    // Classify once: the same result objects are later marked as consumed.
+    const classification = classifyMessages(fresh);
+    return { messages, fresh, results: classification.toolResults, userMessages: classification.userMessages };
   });
 
   // Tool results already attached to a previous turn's tool calls must not show
@@ -269,7 +320,7 @@ export function buildSessionTurns(details = []) {
     const ttft = Number(detail?.latency?.ttft) || 0;
     const total = Number(detail?.latency?.total) || 0;
 
-    const userMessages = extractUserMessages(fresh);
+    const userMessages = batches[index].userMessages;
 
     // Tool calls this turn produced live in the NEXT request's history.
     const nextMessages = Array.isArray(details[index + 1]?.request?.messages)
