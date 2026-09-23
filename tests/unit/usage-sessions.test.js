@@ -119,3 +119,151 @@ describe("session analytics", () => {
     expect(budgetProgress(summary, { costUsd: 0.01 }).exceeded).toBe(true);
   });
 });
+
+describe("tool calls and tool results", () => {
+  const tokens = { prompt_tokens: 900, completion_tokens: 120, cached_tokens: 0, reasoning_tokens: 0 };
+  const base = (id, ts, request, response) => ({
+    id,
+    timestamp: ts,
+    provider: "anthropic",
+    model: "claude-sonnet-4-6",
+    status: "success",
+    tokens,
+    latency: { ttft: 120, total: 900 },
+    request,
+    response,
+  });
+
+  it("hides Anthropic tool_result user messages and attaches them to the call", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T10:00:00Z",
+        { messages: [{ role: "user", content: "What is the weather in Paris?" }] },
+        { content: "[Empty streaming response]", toolCalls: [{ name: "get_weather", arguments: '{"city":"Paris"}' }] }
+      ),
+      base(
+        "d2",
+        "2026-01-01T10:00:05Z",
+        {
+          messages: [
+            { role: "user", content: "What is the weather in Paris?" },
+            { role: "assistant", content: [{ type: "tool_use", id: "tu1", name: "get_weather", input: { city: "Paris" } }] },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "tu1", content: "18C and sunny" }] },
+          ],
+        },
+        { content: "It is 18C and sunny in Paris." }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].userMessages).toHaveLength(1);
+    expect(turns[0].userMessages[0].text).toContain("weather in Paris");
+    expect(turns[0].toolCalls).toHaveLength(1);
+    expect(turns[0].toolCalls[0].result).toContain("18C and sunny");
+    expect(turns[0].assistant.content).toBeNull();
+
+    // The tool result must not surface as a user bubble or a standalone row.
+    expect(turns[1].userMessages).toHaveLength(0);
+    expect(turns[1].toolMessages).toHaveLength(0);
+    expect(turns[1].assistant.content).toContain("18C and sunny");
+  });
+
+  it("attaches role:tool results to the call and keeps them out of user messages", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T11:00:00Z",
+        { messages: [{ role: "user", content: "weather?" }] },
+        { content: null, toolCalls: [{ name: "get_weather", arguments: "{}" }] }
+      ),
+      base(
+        "d2",
+        "2026-01-01T11:00:03Z",
+        {
+          messages: [
+            { role: "user", content: "weather?" },
+            { role: "assistant", content: null, tool_calls: [{ id: "call_1", function: { name: "get_weather", arguments: "{}" } }] },
+            { role: "tool", tool_call_id: "call_1", content: "rain" },
+          ],
+        },
+        { content: "It rains." }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].toolCalls[0].result).toBe("rain");
+    expect(turns[1].userMessages).toHaveLength(0);
+    expect(turns[1].toolMessages).toHaveLength(0);
+  });
+
+  it("keeps unmatched tool results as tool rows, never user bubbles", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T12:00:00Z",
+        {
+          messages: [
+            { role: "user", content: "hi" },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "missing", content: "orphan result" }] },
+          ],
+        },
+        { content: "hello" }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].userMessages).toHaveLength(1);
+    expect(turns[0].userMessages[0].text).toBe("hi");
+    expect(turns[0].toolMessages).toHaveLength(1);
+    expect(turns[0].toolMessages[0].text).toBe("orphan result");
+  });
+
+  it("keeps real user text when a message mixes text and a tool result", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T13:00:00Z",
+        {
+          messages: [
+            { role: "user", content: "hello" },
+            {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: "tu9", content: "42" },
+                { type: "text", text: "and now explain that number" },
+              ],
+            },
+          ],
+        },
+        { content: "Sure." }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].userMessages.map((message) => message.text)).toEqual(["hello", "and now explain that number"]);
+    expect(turns[0].toolMessages).toHaveLength(1);
+    expect(turns[0].toolMessages[0].text).toBe("42");
+  });
+
+  it("hides system prompts from the chat and keeps orphan results visible", () => {
+    const details = [
+      base(
+        "d1",
+        "2026-01-01T14:00:00Z",
+        {
+          messages: [
+            { role: "system", content: "Respond tersely. No filler." },
+            { role: "user", content: "ping" },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "missing", content: "orphan tool output" }] },
+          ],
+        },
+        { content: "pong" }
+      ),
+    ];
+
+    const turns = buildSessionTurns(details);
+    expect(turns[0].userMessages.map((message) => message.text)).toEqual(["ping"]);
+    expect(turns[0].toolMessages.map((message) => message.text)).toEqual(["orphan tool output"]);
+  });
+});

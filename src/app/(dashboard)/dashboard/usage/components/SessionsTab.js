@@ -21,6 +21,7 @@ import {
   eventsFromTrace,
   fallbackCount,
   isSuccessStatus,
+  looksLikeToolError,
   pairToolResults,
   turnContextProblem,
   turnDiagnostics,
@@ -379,18 +380,16 @@ function prettyJson(value) {
   }
 }
 
-function looksLikeToolError(text) {
-  return typeof text === "string" && /(^|\b)(error|failed|exception|denied|timeout|not found)(\b|:)/i.test(text.slice(0, 400));
-}
-
 function ToolCallCards({ calls = [], toolMessages = [], streaming = false }) {
-  const paired = useMemo(() => pairToolResults(calls, toolMessages), [calls, toolMessages]);
+  // The session builder attaches results to their call; toolMessages is only a
+  // fallback for records written before that existed.
+  const paired = useMemo(() => (toolMessages?.length ? pairToolResults(calls, toolMessages) : calls), [calls, toolMessages]);
   if (!paired.length) return null;
   return (
     <div className="mt-2 flex flex-col gap-1.5">
       {paired.map((call, index) => {
         const args = prettyJson(call.arguments);
-        const failed = looksLikeToolError(call.result);
+        const failed = call.resultIsError ?? looksLikeToolError(call.result);
         return (
           <details key={`${call.name}-${index}`} className="group overflow-hidden rounded-lg border border-border-subtle bg-bg">
             <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5">
@@ -581,12 +580,36 @@ function Diagnostics({ turn }) {
   );
 }
 
+const CONTEXT_PREFIX = /^\s*(?:<([a-z_][a-z0-9_]*)>[\s\S]*?<\/\1>\s*)+/i;
+
+/** Real user text: leading environment/workspace blocks collapse into a note. */
+function UserText({ text }) {
+  const value = String(text || "");
+  const match = CONTEXT_PREFIX.exec(value);
+  if (!match) return <RichText text={value} />;
+  const context = match[0].trim();
+  const rest = value.slice(match[0].length).trim();
+  return (
+    <div className="flex flex-col gap-1.5">
+      <details className="rounded-lg border border-border-subtle bg-surface-2/40 px-2 py-1">
+        <summary className="cursor-pointer list-none text-[10px] text-text-muted">
+          context · {context.length.toLocaleString()} chars
+        </summary>
+        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-text-muted">
+          {context}
+        </pre>
+      </details>
+      {rest ? <RichText text={rest} /> : null}
+    </div>
+  );
+}
+
 function UserBubble({ text, at }) {
   return (
     <div className="flex items-start justify-end gap-2.5">
       <div className="flex min-w-0 max-w-[80%] flex-col items-end gap-1">
         <div className="rounded-2xl rounded-br-md bg-primary/10 px-3.5 py-2.5 text-[13px] leading-relaxed text-text-main ring-1 ring-primary/15">
-          <RichText text={text} />
+          <UserText text={text} />
         </div>
         {at ? <span className="pr-1 text-[10px] text-text-subtle">{fmtClock(at)}</span> : null}
       </div>
@@ -630,33 +653,35 @@ function AssistantMessage({ turn, past, liveEntry, routeOpen, onToggleRoute, now
 
         <ThinkingBlock text={assistant?.thinking} streaming={streaming && liveEntry?.phase === "thinking"} durationMs={thinkingMs} />
 
-        <div className="rounded-2xl rounded-tl-md border border-border-subtle bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed text-text-main">
-          {content ? (
-            <>
-              <RichText text={content} />
-              {streaming ? (
-                <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-sky-500 align-middle" />
-              ) : null}
-            </>
-          ) : streaming ? (
-            <Shimmer />
-          ) : (
-            <span className="italic text-text-muted">
-              {turn?.status && !isSuccessStatus(turn.status) ? `(${turn.status})` : "(no content recorded)"}
-            </span>
-          )}
-          <ToolCallCards calls={toolCalls} toolMessages={toolMessages} streaming={streaming} />
-        </div>
-
-        {toolMessages?.length && !toolCalls?.length ? (
-          <div className="flex flex-col gap-0.5 rounded-lg border border-border-subtle bg-surface-2/40 px-2.5 py-1.5 font-mono text-[10px] text-text-muted">
-            {toolMessages.map((message, index) => (
-              <p key={`tool-${index}`} className="truncate" title={message.text || ""}>
-                {message.text || "(tool result)"}
-              </p>
-            ))}
+        {content || streaming || !toolCalls?.length ? (
+          <div className="rounded-2xl rounded-tl-md border border-border-subtle bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed text-text-main">
+            {content ? (
+              <>
+                <RichText text={content} />
+                {streaming ? (
+                  <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-sky-500 align-middle" />
+                ) : null}
+              </>
+            ) : streaming ? (
+              <Shimmer />
+            ) : (
+              <span className="italic text-text-muted">
+                {turn?.status && !isSuccessStatus(turn.status) ? `(${turn.status})` : "(no content recorded)"}
+              </span>
+            )}
+            <ToolCallCards calls={toolCalls} toolMessages={toolMessages} streaming={streaming} />
           </div>
-        ) : null}
+        ) : (
+          <div className="flex flex-col gap-1">
+            <span className="inline-flex items-center gap-1 text-[10px] text-text-subtle">
+              <span className="material-symbols-outlined text-[12px]">build</span>
+              requested {toolCalls.length} tool call{toolCalls.length > 1 ? "s" : ""}
+            </span>
+            <ToolCallCards calls={toolCalls} toolMessages={toolMessages} streaming={streaming} />
+          </div>
+        )}
+
+
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-muted">
           {turn ? <TurnMetrics turn={turn} /> : null}
@@ -726,20 +751,35 @@ function ChatView({ session, turns, content, spikeIds, openRoutes, onToggleRoute
         }).map((turn) => {
           const past = content?.past?.find((entry) => entry.index === turn.index);
           const userMessages = past?.userMessages || turn.userMessages;
+          const toolMessages = past?.toolMessages || turn.toolMessages;
           return (
             <div key={turn.id || turn.index} className={cn("flex flex-col gap-3", spikeIds.has(turn.id) && "rounded-xl bg-warning/5 p-2")}>
-              {userMessages?.length ? (
-                userMessages.map((message, index) => (
-                  <UserBubble key={`user-${index}`} text={message.text || (message.redacted ? "(content hidden)" : "")} at={turn.timestamp} />
-                ))
-              ) : (
-                <div className="flex items-start justify-end gap-2.5">
-                  <span className="rounded-2xl rounded-br-md bg-surface-2 px-3 py-1.5 text-[11px] italic text-text-muted">
-                    follow-up turn — no new user message
+              {userMessages?.length
+                ? userMessages.map((message, index) => (
+                    <UserBubble
+                      key={`user-${index}`}
+                      text={message.text || (message.redacted ? "(content hidden)" : "")}
+                      at={turn.timestamp}
+                    />
+                  ))
+                : null}
+              {toolMessages?.length ? (
+                <div className="ml-9 flex max-w-[80%] flex-col gap-0.5 rounded-lg border border-border-subtle bg-surface-2/40 px-2.5 py-1.5">
+                  <span className="inline-flex items-center gap-1 text-[9px] uppercase tracking-wide text-text-muted">
+                    <span className="material-symbols-outlined text-[11px]">terminal</span>
+                    tool result{toolMessages.length > 1 ? "s" : ""}
                   </span>
-                  <Avatar role="user" />
+                  {toolMessages.map((message, index) => (
+                    <p
+                      key={`tool-${index}`}
+                      className="truncate font-mono text-[10px] text-text-muted"
+                      title={message.text || ""}
+                    >
+                      {message.text || "(tool result)"}
+                    </p>
+                  ))}
                 </div>
-              )}
+              ) : null}
               <AssistantMessage
                 turn={turn}
                 past={past}

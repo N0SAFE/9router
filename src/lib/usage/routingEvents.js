@@ -193,12 +193,25 @@ export function turnDiagnostics(turn) {
   return notes;
 }
 
-/** Pair tool calls with their results (both read from the next request's history). */
+/** Best-effort "this tool result is an error" heuristic for the chat cards. */
+export function looksLikeToolError(text) {
+  return typeof text === "string" && /(^|\b)(error|failed|exception|denied|timeout|not found)(\b|:)/i.test(text.slice(0, 400));
+}
+
+/**
+ * Pair tool calls with their results. Results attached by the session builder
+ * win; the message list is the fallback for older records.
+ */
 export function pairToolResults(toolCalls = [], toolMessages = []) {
   const results = [...(toolMessages || [])];
-  return (toolCalls || []).map((call, index) => ({
-    ...call,
-    result: results[index]?.text || null,
-    resultRole: results[index]?.role || null,
-  }));
+  return (toolCalls || []).map((call, index) => {
+    const fallback = results[index]?.text || null;
+    const result = call?.result ?? fallback;
+    return {
+      ...call,
+      result,
+      resultRole: results[index]?.role || null,
+      resultIsError: call?.resultIsError ?? (fallback ? looksLikeToolError(fallback) : false),
+    };
+  });
 }

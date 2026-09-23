@@ -39,6 +39,63 @@ export function messageText(message) {
   return "";
 }
 
+/**
+ * Split a user-role message into real user text and tool results. Anthropic
+ * style clients send tool results as `role: "user"` with `tool_result` parts;
+ * those must never surface as user bubbles in the chat.
+ */
+export function splitUserContent(message) {
+  const content = message?.content;
+  if (typeof content === "string") return { text: content.trim(), toolResults: [] };
+  if (!Array.isArray(content)) return { text: "", toolResults: [] };
+  const textParts = [];
+  const toolResults = [];
+  for (const part of content) {
+    if (!part) continue;
+    if (part.type === "tool_result") {
+      const text = typeof part.content === "string"
+        ? part.content
+        : Array.isArray(part.content)
+          ? part.content.map((inner) => (typeof inner === "string" ? inner : inner?.text || "")).join("\n")
+          : "";
+      toolResults.push({ text: text.slice(0, 4000), id: part.tool_use_id || null, isError: part.is_error === true });
+      continue;
+    }
+    if (part.type === "tool_use") continue;
+    if (typeof part.text === "string") {
+      textParts.push(part.text);
+      continue;
+    }
+    if (part.type === "image" || part.type === "image_url") textParts.push("[image]");
+  }
+  return { text: textParts.filter(Boolean).join("\n").trim(), toolResults };
+}
+
+/** Real user messages only: never tool results, never injected system prompts. */
+function extractUserMessages(messages = []) {
+  const userMessages = [];
+  for (const message of messages) {
+    if (message?.role !== "user") continue;
+    const { text } = splitUserContent(message);
+    if (text) userMessages.push({ role: "user", text });
+  }
+  return userMessages;
+}
+
+/** Tool results in a message batch, in order (role:tool + tool_result parts). */
+function extractToolResults(messages = []) {
+  const results = [];
+  for (const message of messages) {
+    if (TOOL_ROLES.has(message?.role)) {
+      results.push({ text: messageText(message).slice(0, 4000), name: message?.name || null, id: message?.tool_call_id || null });
+      continue;
+    }
+    if (message?.role !== "user") continue;
+    results.push(...splitUserContent(message).toolResults);
+  }
+  return results;
+}
+
 function messageSignature(message) {
   return `${message?.role || "?"}:${messageText(message).slice(0, 200)}:${Array.isArray(message?.tool_calls) ? message.tool_calls.length : 0}`;
 }
@@ -184,30 +241,35 @@ export function implicitSessionMatches(sessionId, group) {
  * totals. `details` must be oldest-first.
  */
 export function buildSessionTurns(details = []) {
+  // Pass 1: the messages each request added to the history.
+  const batches = details.map((detail, index) => {
+    const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
+    const previous = index > 0 && Array.isArray(details[index - 1]?.request?.messages)
+      ? details[index - 1].request.messages
+      : [];
+    const fresh = messages.filter((message, position) => {
+      if (position >= previous.length) return true;
+      return messageSignature(message) !== messageSignature(previous[position]);
+    });
+    // Extract once: the same result objects are later marked as consumed.
+    return { messages, fresh, results: extractToolResults(fresh) };
+  });
+
+  // Tool results already attached to a previous turn's tool calls must not show
+  // up again as standalone rows.
+  const consumed = batches.map(() => new Set());
   const turns = [];
-  let previousMessages = [];
   let cumulativeTokens = 0;
   let cumulativeCost = 0;
 
   details.forEach((detail, index) => {
-    const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
+    const { fresh } = batches[index];
     const tokens = tokenMetrics(detail);
     const costUsd = Number(detail?.cost) || 0;
     const ttft = Number(detail?.latency?.ttft) || 0;
     const total = Number(detail?.latency?.total) || 0;
 
-    // New messages for this turn = the history added since the previous request.
-    const previousSignatures = previousMessages.map(messageSignature);
-    const newMessages = messages.filter((message, position) => {
-      const signature = messageSignature(message);
-      return position >= previousMessages.length || previousSignatures[position] !== signature;
-    });
-    const userMessages = newMessages
-      .filter((message) => message?.role === "user" || message?.role === "system")
-      .map((message) => ({ role: message.role, text: messageText(message) }));
-    const toolMessages = newMessages
-      .filter((message) => TOOL_ROLES.has(message?.role))
-      .map((message) => ({ role: "tool", text: messageText(message).slice(0, 2000) }));
+    const userMessages = extractUserMessages(fresh);
 
     // Tool calls this turn produced live in the NEXT request's history.
     const nextMessages = Array.isArray(details[index + 1]?.request?.messages)
@@ -219,13 +281,40 @@ export function buildSessionTurns(details = []) {
     const recordedToolCalls = Array.isArray(detail?.response?.toolCalls)
       ? detail.response.toolCalls.filter((call) => call && (call.name || call.arguments))
       : [];
-    const toolCalls = recordedToolCalls.length > 0
+    const baseCalls = recordedToolCalls.length > 0
       ? recordedToolCalls.map((call) => ({ name: call.name || "tool", arguments: call.arguments || null }))
       : assistantIndex >= 0
         ? toolCallsFrom([nextMessages[assistantIndex]])
         : [];
 
+    // Results of those calls arrive with the next request: attach them here so
+    // the chat shows the call and its result as one exchange. Only results that
+    // matched a call are consumed, so orphans still surface as tool rows.
+    const nextBatch = batches[index + 1];
+    const nextResults = nextBatch?.results || [];
+    const matchedResults = nextResults.slice(0, baseCalls.length);
+    for (const result of matchedResults) consumed[index + 1].add(result);
+    const toolCalls = baseCalls.map((call, position) => ({
+      ...call,
+      result: matchedResults[position]?.text || null,
+      resultName: matchedResults[position]?.name || null,
+      resultIsError: matchedResults[position]?.isError === true,
+    }));
+
+    // Standalone tool results (no matching call, or calls not recorded).
+    const toolMessages = batches[index].results
+      .filter((result) => !consumed[index].has(result))
+      .map((result) => ({
+        role: "tool",
+        text: result.text,
+        name: result.name || null,
+        toolCallId: result.id || null,
+      }));
+
     const response = detail?.response || {};
+    const rawContent = typeof response?.content === "string" ? response.content : response?.content ?? null;
+    // A tool-calling turn has no text: keep it null instead of a placeholder.
+    const assistantContent = rawContent === "[Empty streaming response]" && toolCalls.length > 0 ? null : rawContent;
     let inputSpeed = null;
     let outputSpeed = null;
     if (ttft > 0 && tokens.input > 0) inputSpeed = tokens.input / (ttft / 1000);
@@ -252,8 +341,8 @@ export function buildSessionTurns(details = []) {
       toolCalls,
       userMessages,
       toolMessages,
-      assistant: typeof response?.content === "string" || response?.content !== undefined
-        ? { content: response.content ?? null, thinking: response.thinking ?? null, finishReason: response.finish_reason ?? null }
+      assistant: typeof rawContent === "string" || rawContent !== undefined
+        ? { content: assistantContent, thinking: response.thinking ?? null, finishReason: response.finish_reason ?? null }
         : null,
       routing: detail?.routing || null,
       cacheHitRate: tokens.input > 0 ? tokens.cached / tokens.input : null,
@@ -261,8 +350,6 @@ export function buildSessionTurns(details = []) {
       cumulativeCostUsd: cumulativeCost,
       flags: [],
     });
-
-    previousMessages = messages;
   });
 
   return turns;
