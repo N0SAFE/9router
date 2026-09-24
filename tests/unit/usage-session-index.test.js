@@ -55,6 +55,16 @@ describe("request detail session indexes", () => {
     const slim = slimRequest(request, 64 * 1024);
     expect(JSON.stringify(slim).length).toBeLessThanOrEqual(64 * 1024);
     expect(slim._omittedMessages).toBeGreaterThan(0);
+
+    const toolHeavy = {
+      messages: Array.from({ length: 312 }, (_, index) => ({
+        role: index % 3 === 0 ? "assistant" : "user",
+        content: "x".repeat(400),
+        ...(index % 3 === 0 ? { tool_calls: [{ id: `call-${index}`, function: { name: "read_file", arguments: JSON.stringify({ path: "x".repeat(900) }) } }] } : {}),
+      })),
+    };
+    const toolSlim = slimRequest(toolHeavy, 64 * 1024);
+    expect(JSON.stringify(toolSlim).length).toBeLessThanOrEqual(64 * 1024);
   });
 
   it("stores lookup keys and retrieves only the matching implicit conversation", async () => {

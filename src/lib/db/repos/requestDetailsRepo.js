@@ -237,7 +237,7 @@ function buildSlimRequest(request, cap, originalSize, maxMessages = Number.POSIT
                       name: call?.function?.name || call?.name || null,
                       arguments:
                         typeof call?.function?.arguments === "string"
-                          ? call.function.arguments.slice(0, 1000)
+                          ? call.function.arguments.slice(0, Math.min(1000, Math.max(32, cap * 4)))
                           : call?.function?.arguments ?? null,
                     },
                   })),
@@ -271,9 +271,9 @@ export function slimRequest(request, maxSize) {
     }
   }
 
-  // The final fallback keeps the first and last message only. It is preferable
-  // to storing an oversized row that blocks every future session rebuild.
-  return buildSlimRequest(request, 24, str.length, 2);
+  // The final fallback keeps one message only. It is preferable to storing an
+  // oversized row that blocks every future session rebuild.
+  return buildSlimRequest(request, 24, str.length, 1);
 }
 
 async function flushToDatabase() {
