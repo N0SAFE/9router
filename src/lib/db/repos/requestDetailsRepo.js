@@ -355,6 +355,7 @@ async function flushToDatabase() {
             sessionId: record.sessionId,
             implicitKey,
             liveKey,
+            detail: record,
             provider: record.provider,
             model: record.model,
             timestamp: record.timestamp,
@@ -486,6 +487,19 @@ export async function getRecentDetailRows(limit = 500) {
   const db = await getAdapter();
   const capped = Math.max(1, Math.min(Number(limit) || 500, 2000));
   const rows = db.all(`SELECT data FROM requestDetails ORDER BY timestamp DESC LIMIT ?`, [capped]);
+  return rows.map((row) => parseJson(row.data, null)).filter(Boolean);
+}
+
+/** Recent implicit-session rows only, newest first, parsed for list grouping. */
+export async function getRecentImplicitDetailRows(limit = 800) {
+  const db = await getAdapter();
+  const capped = Math.max(1, Math.min(Number(limit) || 800, 2000));
+  const rows = db.all(
+    `SELECT data FROM requestDetails
+     WHERE sessionId IS NULL
+     ORDER BY timestamp DESC LIMIT ?`,
+    [capped]
+  );
   return rows.map((row) => parseJson(row.data, null)).filter(Boolean);
 }
 

@@ -11,7 +11,9 @@ import {
   getDetailsByLiveKey,
   getDetailsBySession,
   getRecentDetailRows,
+  getRecentImplicitDetailRows,
   ensureRequestDetailMaintenance,
+  detailsEmitter,
 } from "@/lib/db/index.js";
 import { getSettings } from "@/lib/localDb";
 import { getProviderConnections } from "@/lib/localDb";
@@ -20,9 +22,11 @@ import {
   buildSessionTurns,
   detectSpikes,
   groupImplicitSessions,
+  implicitDetailContinues,
   implicitKeyFromSessionId,
   labelForDetail,
   liveKeyForDetail,
+  mergeKeyForDetail,
   summarizeSession,
 } from "./sessions.js";
 import { summarizeRouting } from "./routingEvents.js";
@@ -258,11 +262,70 @@ export async function listExplicitSessions(limit = 200) {
   }));
 }
 
+// The sessions list is polled frequently. Keep its grouped result in memory and
+// apply new detail events incrementally instead of reparsing the whole ring.
+const implicitListCache = {
+  groups: [],
+  initialized: false,
+  listenerInstalled: false,
+};
+
+function updateImplicitListCache(detail) {
+  if (!implicitListCache.initialized || !detail || detail.sessionId) return;
+  const mergeKey = mergeKeyForDetail(detail);
+  let group = null;
+  for (let index = implicitListCache.groups.length - 1; index >= 0; index -= 1) {
+    const candidate = implicitListCache.groups[index];
+    if (candidate.mergeKey !== mergeKey) continue;
+    group = candidate;
+    break;
+  }
+
+  if (group) {
+    const existingIndex = group.details.findIndex((entry) => entry.id && entry.id === detail.id);
+    if (existingIndex >= 0) {
+      group.details[existingIndex] = detail;
+      group.lastAt = new Date(detail.timestamp || 0).getTime();
+      return;
+    }
+    const previous = group.details[group.details.length - 1];
+    if (implicitDetailContinues(previous, detail)) {
+      group.details.push(detail);
+      group.lastAt = new Date(detail.timestamp || 0).getTime();
+      return;
+    }
+  }
+
+  implicitListCache.groups.push({
+    id: `implicit:${mergeKey}:${detail.timestamp}`,
+    mergeKey,
+    liveKey: liveKeyForDetail(detail),
+    kind: "implicit",
+    details: [detail],
+  });
+}
+
+function ensureImplicitListCache() {
+  if (implicitListCache.listenerInstalled) return;
+  implicitListCache.listenerInstalled = true;
+  detailsEmitter.on("detail", (entry) => updateImplicitListCache(entry?.detail));
+}
+
+export function clearImplicitSessionListCache() {
+  implicitListCache.groups = [];
+  implicitListCache.initialized = false;
+}
+
 /** List implicit sessions from the recent details ring. */
 export async function listImplicitSessions(limit = 100) {
   await ensureRequestDetailMaintenance();
-  const recent = await getRecentDetailRows(800);
-  const groups = groupImplicitSessions(recent).slice(0, limit);
+  ensureImplicitListCache();
+  if (!implicitListCache.initialized) {
+    const recent = await getRecentImplicitDetailRows(800);
+    implicitListCache.groups = groupImplicitSessions(recent);
+    implicitListCache.initialized = true;
+  }
+  const groups = implicitListCache.groups.slice(0, limit);
   return groups.map((group) => {
     const summary = summarizeSession(group.details);
     return {

@@ -288,6 +288,13 @@ export function implicitSessionMatches(sessionId, group) {
   return group.id === sessionId;
 }
 
+/** Whether a newly persisted detail continues one implicit conversation. */
+export function implicitDetailContinues(previous, detail) {
+  if (!previous || !detail) return false;
+  const bucket = { details: [previous] };
+  return conversationContinues(bucket, detail) && !overlapsInFlight(bucket, detail);
+}
+
 /**
  * Extract the persisted implicit grouping key from an implicit session id.
  * Ids are `implicit:<mergeKey>:<startedAt>`; the timestamp contains colons, so

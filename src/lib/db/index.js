@@ -70,7 +70,7 @@ export {
   saveRequestDetail, getRequestDetails, getRequestDetailById, getDistinctProviders,
   getLastRequestDetail, getRequestDetailByClientRequestId,
   getRequestDetailsInRange,
-  getDetailsBySession, getRecentDetailRows, getDetailsByImplicitKey, getDetailsByLiveKey,
+  getDetailsBySession, getRecentDetailRows, getRecentImplicitDetailRows, getDetailsByImplicitKey, getDetailsByLiveKey,
   ensureImplicitSessionKeys, ensureRequestDetailMaintenance, detailsEmitter,
 } from "./repos/requestDetailsRepo.js";
 

@@ -16,6 +16,7 @@ import { clearLoginLockouts, loginLockoutSize } from "@/lib/auth/loginLimiter.js
 import { clearLiveSessions, liveSessionCount } from "@/lib/usage/liveSessions.js";
 import { clearLiveRequests, liveRequestCount } from "@/lib/usage/liveRouting.js";
 import { clearLiveTurns, liveTurnCount } from "@/lib/usage/liveContent.js";
+import { clearImplicitSessionListCache } from "@/lib/usage/sessionPayload.js";
 import { clearProjectIdCache, projectIdCacheSize } from "open-sse/services/projectId.js";
 import { clearCursorModelCache } from "open-sse/services/cursorModels.js";
 import { clearSessionStore } from "open-sse/utils/sessionManager.js";
@@ -150,7 +151,10 @@ const SURFACES = [
       "The rows behind the Sessions tab: prompts, replies, tool calls, routing traces and per-request metrics.",
     warning: "The Sessions tab empties out; transcripts copied earlier are unaffected.",
     stats: async () => ({ entries: await countRows(TABLES.requestDetails) }),
-    clear: async () => ({ removed: await dropRows(TABLES.requestDetails) }),
+    clear: async () => {
+      clearImplicitSessionListCache();
+      return { removed: await dropRows(TABLES.requestDetails) };
+    },
   },
   {
     id: "usageAggregates",
