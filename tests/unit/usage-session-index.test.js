@@ -44,6 +44,19 @@ afterAll(() => {
 });
 
 describe("request detail session indexes", () => {
+  it("caps total stored request size, not only each message", async () => {
+    const { slimRequest } = await import("../../src/lib/db/repos/requestDetailsRepo.js");
+    const request = {
+      messages: Array.from({ length: 1800 }, (_, index) => ({
+        role: index % 2 ? "assistant" : "user",
+        content: `message ${index} ${"x".repeat(500)}`,
+      })),
+    };
+    const slim = slimRequest(request, 64 * 1024);
+    expect(JSON.stringify(slim).length).toBeLessThanOrEqual(64 * 1024);
+    expect(slim._omittedMessages).toBeGreaterThan(0);
+  });
+
   it("stores lookup keys and retrieves only the matching implicit conversation", async () => {
     await save(detail("implicit-a-1", "same question", "2026-09-24T10:00:00.000Z"));
     await save(detail("implicit-a-2", "same question", "2026-09-24T10:01:00.000Z"));

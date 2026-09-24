@@ -71,7 +71,7 @@ export {
   getLastRequestDetail, getRequestDetailByClientRequestId,
   getRequestDetailsInRange,
   getDetailsBySession, getRecentDetailRows, getDetailsByImplicitKey, getDetailsByLiveKey,
-  ensureImplicitSessionKeys, detailsEmitter,
+  ensureImplicitSessionKeys, ensureRequestDetailMaintenance, detailsEmitter,
 } from "./repos/requestDetailsRepo.js";
 
 // Export/import full DB

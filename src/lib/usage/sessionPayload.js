@@ -11,6 +11,7 @@ import {
   getDetailsByLiveKey,
   getDetailsBySession,
   getRecentDetailRows,
+  ensureRequestDetailMaintenance,
 } from "@/lib/db/index.js";
 import { getSettings } from "@/lib/localDb";
 import { getProviderConnections } from "@/lib/localDb";
@@ -259,6 +260,7 @@ export async function listExplicitSessions(limit = 200) {
 
 /** List implicit sessions from the recent details ring. */
 export async function listImplicitSessions(limit = 100) {
+  await ensureRequestDetailMaintenance();
   const recent = await getRecentDetailRows(800);
   const groups = groupImplicitSessions(recent).slice(0, limit);
   return groups.map((group) => {

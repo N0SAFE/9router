@@ -108,6 +108,53 @@ export async function ensureImplicitSessionKeys() {
   return implicitKeyBackfillPromise;
 }
 
+// Old rows can also predate the total-size guarantee in slimRequest. Compact
+// those rows once, lazily, instead of letting a large historical transcript slow
+// every session view. The original request is intentionally not reconstructed:
+// observability storage is bounded evidence, not a second source of truth.
+let detailMaintenancePromise = null;
+
+export async function ensureRequestDetailMaintenance() {
+  if (!detailMaintenancePromise) {
+    detailMaintenancePromise = (async () => {
+      await ensureImplicitSessionKeys();
+      const config = await getObservabilityConfig();
+      const db = await getAdapter();
+      const sizeThreshold = Math.max(128 * 1024, config.maxJsonSize * 2);
+      const rows = db.all(
+        `SELECT id, data FROM requestDetails WHERE length(data) > ?`,
+        [sizeThreshold]
+      );
+      if (rows.length === 0) return 0;
+
+      let compacted = 0;
+      db.transaction(() => {
+        for (const row of rows) {
+          const detail = parseJson(row.data, null);
+          if (!detail) continue;
+          const next = {
+            ...detail,
+            request: slimRequest(detail.request, config.maxJsonSize),
+            providerRequest: truncateField(detail.providerRequest, config.providerMaxJsonSize || config.maxJsonSize),
+            providerResponse: truncateField(detail.providerResponse, config.providerMaxJsonSize || config.maxJsonSize),
+            response: truncateField(detail.response, config.maxJsonSize),
+            ...(detail.routing ? { routing: truncateField(detail.routing, config.maxJsonSize) } : {}),
+          };
+          const serialized = stringifyJson(next);
+          if (serialized.length >= row.data.length) continue;
+          db.run("UPDATE requestDetails SET data = ? WHERE id = ?", [serialized, row.id]);
+          compacted += 1;
+        }
+      });
+      return compacted;
+    })().catch((error) => {
+      detailMaintenancePromise = null;
+      throw error;
+    });
+  }
+  return detailMaintenancePromise;
+}
+
 let writeBuffer = [];
 let flushTimer = null;
 let isFlushing = false;
@@ -158,15 +205,27 @@ function capContent(content, cap) {
   return content;
 }
 
-function buildSlimRequest(request, cap, originalSize) {
+function buildSlimRequest(request, cap, originalSize, maxMessages = Number.POSITIVE_INFINITY) {
   const { messages, ...rest } = request || {};
   delete rest.tools;
   delete rest.functions;
+  const sourceMessages = Array.isArray(messages) ? messages : null;
+  let keptMessages = sourceMessages;
+  let omittedMessages = 0;
+  if (sourceMessages && sourceMessages.length > maxMessages) {
+    const headCount = Math.ceil(maxMessages / 2);
+    const tailCount = Math.floor(maxMessages / 2);
+    keptMessages = [
+      ...sourceMessages.slice(0, headCount),
+      ...(tailCount > 0 ? sourceMessages.slice(-tailCount) : []),
+    ];
+    omittedMessages = sourceMessages.length - keptMessages.length;
+  }
   return {
     ...rest,
-    ...(Array.isArray(messages)
+    ...(keptMessages
       ? {
-          messages: messages.map((message) => ({
+          messages: keptMessages.map((message) => ({
             role: message?.role,
             ...(message?.name ? { name: message.name } : {}),
             ...(message?.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
@@ -186,6 +245,7 @@ function buildSlimRequest(request, cap, originalSize) {
               : {}),
             ...(message?.content !== undefined ? { content: capContent(message.content, cap) } : {}),
           })),
+          ...(omittedMessages > 0 ? { _omittedMessages: omittedMessages } : {}),
         }
       : {}),
     _truncated: true,
@@ -201,11 +261,19 @@ function buildSlimRequest(request, cap, originalSize) {
 export function slimRequest(request, maxSize) {
   const str = JSON.stringify(request || {});
   if (str.length <= maxSize) return request || {};
-  for (const cap of [4000, 1000, 250]) {
-    const slim = buildSlimRequest(request, cap, str.length);
-    if (JSON.stringify(slim).length <= maxSize) return slim;
+
+  const messageCount = Array.isArray(request?.messages) ? request.messages.length : 0;
+  for (const cap of [4000, 1000, 250, 120, 60]) {
+    for (const maxMessages of [messageCount, 1000, 500, 250, 100, 50, 20, 1]) {
+      if (maxMessages > messageCount && maxMessages !== messageCount) continue;
+      const slim = buildSlimRequest(request, cap, str.length, maxMessages);
+      if (JSON.stringify(slim).length <= maxSize) return slim;
+    }
   }
-  return buildSlimRequest(request, 120, str.length);
+
+  // The final fallback keeps the first and last message only. It is preferable
+  // to storing an oversized row that blocks every future session rebuild.
+  return buildSlimRequest(request, 24, str.length, 2);
 }
 
 async function flushToDatabase() {
@@ -427,7 +495,7 @@ export async function getRecentDetailRows(limit = 500) {
  */
 export async function getDetailsByImplicitKey(implicitKey, limit = 1000) {
   if (!implicitKey) return [];
-  await ensureImplicitSessionKeys();
+  await ensureRequestDetailMaintenance();
   const db = await getAdapter();
   const capped = Math.max(1, Math.min(Number(limit) || 1000, 2000));
   const rows = db.all(
@@ -442,7 +510,7 @@ export async function getDetailsByImplicitKey(implicitKey, limit = 1000) {
 /** Details matching an in-flight/live first-user identity. */
 export async function getDetailsByLiveKey(liveKey, limit = 1000) {
   if (!liveKey) return [];
-  await ensureImplicitSessionKeys();
+  await ensureRequestDetailMaintenance();
   const db = await getAdapter();
   const capped = Math.max(1, Math.min(Number(limit) || 1000, 2000));
   const rows = db.all(
