@@ -2,6 +2,7 @@ import { saveRequestUsage, appendRequestLog, saveRequestDetail } from "@/lib/usa
 import { COLORS } from "../../utils/stream.js";
 import { canonicalizeUsage } from "../../utils/usageTracking.js";
 import { routingSummary } from "../../services/routingTrace.js";
+import { updateLiveRequestUsage } from "@/lib/usage/liveRouting.js";
 
 const OPTIONAL_PARAMS = [
   "temperature", "top_p", "top_k",
@@ -118,7 +119,7 @@ export function formatDoneLine({ usage, latency }) {
   return `DONE ${latency?.total ?? 0}ms${ttftStr} · ${inStr} · OUT ${outTok}`;
 }
 
-export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, routing = null, latency = null, label = "USAGE", silent = false }) {
+export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, routing = null, latency = null, label = "USAGE", silent = false, liveRequestId = null }) {
   if (!tokens || typeof tokens !== "object") return;
 
   const inTokens = tokens.input_tokens ?? tokens.prompt_tokens ?? 0;
@@ -138,6 +139,15 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
     prompt_tokens: tokens.prompt_tokens ?? tokens.input_tokens ?? 0,
     completion_tokens: tokens.completion_tokens ?? tokens.output_tokens ?? 0
   };
+
+  if (liveRequestId) {
+    updateLiveRequestUsage(liveRequestId, {
+      provider,
+      model,
+      tokens: normalized,
+      connectionId,
+    });
+  }
 
   const summary = routing ? routingSummary(routing) : "";
   saveRequestUsage({

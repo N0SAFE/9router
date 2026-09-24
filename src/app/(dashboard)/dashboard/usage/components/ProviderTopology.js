@@ -11,19 +11,16 @@ import {
   getBezierPath,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { AI_PROVIDERS } from "@/shared/constants/providers";
+import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
 import { fmtCompact, fmtTime } from "./format";
-
-// Force-stop FE animation if a provider stays active longer than this
-const FE_ACTIVE_TIMEOUT_MS = 60000;
-const FE_ACTIVE_TICK_MS = 1000;
 
 // Kame + electric particles along active edges. Counts/speed scale with the
 // number of active connections (or in-flight requests) the edge carries.
 const KAME_PARTICLE_COUNT = 6;
 const SPARK_COUNT = 5;
 const MAX_FLOW_BOOST = 3;
+const FAILURE_BLINK_MS = 12_000;
 
 const MODES = [
   { value: "providers", label: "Providers" },
@@ -31,12 +28,15 @@ const MODES = [
   { value: "combos", label: "Combos" },
 ];
 
+const FIT_VIEW_OPTIONS = { padding: 0.2, duration: 200 };
+
 function getProviderConfig(providerId) {
-  return AI_PROVIDERS[providerId] || { color: "#6b7280", name: providerId };
+  const id = resolveProviderId(providerId);
+  return AI_PROVIDERS[id] || { color: "#6b7280", name: providerId };
 }
 
 function getProviderImageUrl(providerId) {
-  return getProviderIconSrc(providerId);
+  return getProviderIconSrc(resolveProviderId(providerId));
 }
 
 function providerOfModel(model) {
@@ -44,22 +44,444 @@ function providerOfModel(model) {
   return model.slice(0, model.indexOf("/"));
 }
 
+function normalizeProviderId(value) {
+  return resolveProviderId(String(value || "unknown")).toLowerCase();
+}
+
+function activeLiveRequests(liveRequests) {
+  return (liveRequests || []).filter((entry) => (
+    entry?.persisted === false
+    && !entry.finishedAt
+    && entry.status !== "completed"
+    && entry.status !== "error"
+  ));
+}
+
+function connectionIdentity(entry) {
+  const attempts = Array.isArray(entry?.attempts) ? entry.attempts : [];
+  const latestAttempt = [...attempts].reverse().find((attempt) => attempt?.connectionId || attempt?.account);
+  const connectionId = entry?.connectionId || latestAttempt?.connectionId || null;
+  const connectionName = entry?.connectionName
+    || entry?.selectedAccount
+    || latestAttempt?.account
+    || latestAttempt?.connectionName
+    || (connectionId ? connectionId.slice(0, 8) : null);
+  return { connectionId, connectionName };
+}
+
+function hasConnectionIdentity(connectionId, connectionName) {
+  return Boolean(connectionId || (connectionName && connectionName !== "unassigned"));
+}
+
+/**
+ * Count distinct live sessions, not just active account/model rows. The
+ * fallback keeps the canvas useful during the short window before the live
+ * registry has emitted its selected connection.
+ */
+function buildSessionTopology(liveRequests, activeRequests, metricsSince = 0) {
+  const byProvider = new Map();
+  const byConnection = new Map();
+  const connectionRows = new Map();
+  const liveRows = new Map();
+  const metricsByProvider = new Map();
+  const failuresByProvider = new Map();
+  const failuresByConnection = new Map();
+  const active = activeLiveRequests(liveRequests);
+  const activeIds = new Set(active.map((entry) => entry.id));
+  const seenLiveIds = new Set();
+  const now = Date.now();
+
+  const connectionKey = (provider, connectionId, connectionName) => (
+    `${provider}|${connectionId || connectionNameKey(connectionName) || "unassigned"}`
+  );
+
+  const getLiveRow = (provider, connectionId, connectionName) => {
+    if (!hasConnectionIdentity(connectionId, connectionName)) return null;
+    const key = connectionKey(provider, connectionId, connectionName);
+    let row = liveRows.get(key);
+    if (!row) {
+      row = {
+        provider,
+        connectionId: connectionId || null,
+        connectionName: connectionName || (connectionId ? String(connectionId).slice(0, 8) : "connection"),
+        liveRequests: 0,
+        liveTokens: 0,
+        failureAt: 0,
+        failureKind: null,
+        failureMessage: null,
+      };
+      liveRows.set(key, row);
+    }
+    if (!row.connectionId && connectionId) row.connectionId = connectionId;
+    if (row.connectionName === "unassigned" && connectionName) row.connectionName = connectionName;
+    return row;
+  };
+
+  const updateFailure = (provider, connectionId, connectionName, failure) => {
+    if (!provider || !failure.kind) return;
+    const at = eventTime(failure.at);
+    if (!at || now - at > FAILURE_BLINK_MS || at - now > 5_000) return;
+    const row = getLiveRow(provider, connectionId, connectionName);
+    if (row && (!row.failureAt || at >= row.failureAt)) {
+      row.failureAt = at;
+      row.failureKind = failure.kind;
+      row.failureMessage = failure.message || null;
+    }
+    const currentProviderFailure = failuresByProvider.get(provider);
+    if (!currentProviderFailure || at >= currentProviderFailure.at) {
+      failuresByProvider.set(provider, { ...failure, at });
+    }
+    if (hasConnectionIdentity(connectionId, connectionName)) {
+      const key = connectionKey(provider, connectionId, connectionName);
+      const currentConnectionFailure = failuresByConnection.get(key);
+      if (!currentConnectionFailure || at >= currentConnectionFailure.at) {
+        failuresByConnection.set(key, { ...failure, at, provider, connectionId: connectionId || null, connectionName: connectionName || null });
+      }
+    }
+  };
+
+  for (const entry of active) {
+    const provider = normalizeProviderId(entry.provider);
+    const sessionKey = entry.sessionId || entry.liveKey || entry.id;
+    const { connectionId, connectionName } = connectionIdentity(entry);
+    if (!byProvider.has(provider)) byProvider.set(provider, new Set());
+    byProvider.get(provider).add(sessionKey);
+    if (!hasConnectionIdentity(connectionId, connectionName)) continue;
+    const key = connectionKey(provider, connectionId, connectionName);
+    if (!byConnection.has(key)) {
+      byConnection.set(key, { provider, connectionId, connectionName, sessions: new Set() });
+    }
+    byConnection.get(key).sessions.add(sessionKey);
+    if (!connectionRows.has(key)) {
+      connectionRows.set(key, { provider, connectionId, connectionName, activeCount: 0, sessionCount: 0, sessions: new Set() });
+    }
+    const connectionRow = connectionRows.get(key);
+    connectionRow.activeCount += 1;
+    connectionRow.sessions.add(sessionKey);
+  }
+
+  for (const row of connectionRows.values()) {
+    row.sessionCount = row.sessions.size;
+    delete row.sessions;
+  }
+
+  // Live entries are also a lightweight real-time metrics overlay. Historical
+  // routing data remains the baseline; only entries started after that snapshot
+  // (or still in flight) are added, so persisted requests are not double-counted.
+  for (const entry of liveRequests || []) {
+    if (!entry || (entry.id && seenLiveIds.has(entry.id))) continue;
+    if (entry.id) seenLiveIds.add(entry.id);
+    const provider = normalizeProviderId(entry.provider);
+    if (!entry.provider) continue;
+    const isActive = activeIds.has(entry.id)
+      || (entry.persisted === false && !entry.finishedAt && !["completed", "error"].includes(entry.status));
+    const startedAt = Number(entry.startedAtMs) || eventTime(entry.startedAt);
+    const completedAt = Number(entry.finishedAtMs) || Number(entry.completedAtMs) || eventTime(entry.finishedAt || entry.completedAt);
+    const includeMetrics = isActive
+      || !metricsSince
+      || (startedAt > 0 && startedAt >= metricsSince)
+      || (completedAt > 0 && completedAt >= metricsSince);
+    const { connectionId, connectionName } = connectionIdentity(entry);
+
+    if (includeMetrics) {
+      const row = getLiveRow(provider, connectionId, connectionName);
+      if (row) {
+        row.liveRequests += 1;
+        row.liveTokens += tokenTotal(entry.tokens);
+      }
+      const metrics = metricsByProvider.get(provider) || { requests: 0, tokens: 0 };
+      metrics.requests += 1;
+      metrics.tokens += tokenTotal(entry.tokens);
+      metricsByProvider.set(provider, metrics);
+    }
+
+    const attempts = Array.isArray(entry.attempts) ? entry.attempts : [];
+    for (const attempt of attempts) {
+      const attemptProvider = normalizeProviderId(attempt.provider || entry.provider);
+      const kind = classifyFailure(attempt.status, attempt.error, attempt.action);
+      updateFailure(attemptProvider, attempt.connectionId, attempt.account || attempt.connectionName, {
+        kind,
+        at: attempt.at,
+        message: attempt.error || attempt.action || `HTTP ${attempt.status ?? "?"}`,
+      });
+    }
+    for (const event of Array.isArray(entry.events) ? entry.events : []) {
+      if (event.type !== "error") continue;
+      const eventProvider = normalizeProviderId(event.provider || entry.provider);
+      updateFailure(eventProvider, event.connectionId, event.connectionName || event.account, {
+        kind: classifyFailure(event.status, event.error, event.action),
+        at: event.at || event.atIso,
+        message: event.error || event.message,
+      });
+    }
+    if (entry.status === "error" && entry.error) {
+      updateFailure(provider, connectionId, connectionName, {
+        kind: classifyFailure(entry.status, entry.error),
+        at: entry.finishedAtMs || entry.finishedAt,
+        message: entry.error,
+      });
+    }
+  }
+
+  for (const request of activeRequests || []) {
+    const provider = normalizeProviderId(request.provider);
+    const connectionId = request.connectionId || null;
+    const name = request.account || request.connectionName || (connectionId ? String(connectionId).slice(0, 8) : null);
+    if (!hasConnectionIdentity(connectionId, name)) continue;
+    const key = connectionKey(provider, connectionId, name);
+    const existing = connectionRows.get(key)
+      || [...connectionRows.values()].find((row) => (
+        row.provider === provider
+        && (row.connectionName === name || (connectionId && row.connectionId === connectionId))
+      ));
+    if (existing) {
+      existing.activeCount += Number(request.count) > 0 ? Number(request.count) : 1;
+      if (connectionId && !existing.connectionId) existing.connectionId = connectionId;
+      if (name && !existing.connectionName) existing.connectionName = name;
+      continue;
+    }
+    connectionRows.set(key, {
+      provider,
+      connectionId,
+      connectionName: name,
+      activeCount: Number(request.count) > 0 ? Number(request.count) : 1,
+      sessionCount: 0,
+    });
+  }
+
+  return {
+    byProvider,
+    byConnection,
+    connectionRows,
+    liveRows,
+    metricsByProvider,
+    failuresByProvider,
+    failuresByConnection,
+    totalSessions: [...byProvider.values()].reduce((sum, sessions) => sum + sessions.size, 0),
+  };
+}
+
+function connectionNameKey(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function tokenTotal(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (!value || typeof value !== "object") return 0;
+  const total = Number(value.total ?? value.totalTokens ?? value.total_tokens);
+  if (Number.isFinite(total)) return total;
+  const input = Number(
+    value.input
+    ?? value.prompt
+    ?? value.promptTokens
+    ?? value.prompt_tokens
+    ?? value.input_tokens
+    ?? 0
+  );
+  const output = Number(
+    value.output
+    ?? value.completion
+    ?? value.completionTokens
+    ?? value.completion_tokens
+    ?? 0
+  );
+  return (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0);
+}
+
+function isSuccessStatusValue(status) {
+  if (status == null || status === "") return true;
+  const numeric = Number(status);
+  if (Number.isFinite(numeric)) return numeric >= 200 && numeric < 400;
+  return ["ok", "success", "completed", "streaming"].includes(String(status).toLowerCase());
+}
+
+function classifyFailure(status, error, action) {
+  if (isSuccessStatusValue(status) && !error) return null;
+  const text = `${status || ""} ${error || ""} ${action || ""}`.toLowerCase();
+  const numericStatus = Number(status);
+  const warning = numericStatus === 429
+    || numericStatus === 402
+    || /rate.?limit|too many requests|resource.?exhausted|retry.?after|cooldown|overload|server overloaded|temporarily unavailable/.test(text)
+    || /subscription|plan (has )?(ended|expired)|subscription.*(ended|expired)|billing|payment required|insufficient (credits|balance|funds)|credit balance/.test(text);
+  return warning ? "warning" : "error";
+}
+
+function eventTime(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeProviderConnections(provider, routingProvider, topology, configuredConnections = []) {
+  const providerKey = normalizeProviderId(provider.provider);
+  const merged = new Map();
+  const byName = new Map();
+  const configuredRows = Array.isArray(configuredConnections) ? configuredConnections : [];
+
+  const connectionIdOf = (connection) => connection?.connectionId || connection?.id || null;
+  const connectionNameOf = (connection) => (
+    connection?.name
+    || connection?.connectionName
+    || connection?.account
+    || null
+  );
+
+  const registerName = (name, key) => {
+    const normalizedName = connectionNameKey(name);
+    if (normalizedName && !byName.has(normalizedName)) byName.set(normalizedName, key);
+  };
+
+  const findKey = (connection, preferName) => {
+    const name = connectionNameKey(connectionNameOf(connection));
+    if (preferName && name && byName.has(name)) return byName.get(name);
+    const id = connectionIdOf(connection);
+    if (id) return `id:${id}`;
+    return name ? `name:${name}` : null;
+  };
+
+  const addHistoricalConnection = (connection) => {
+    if (!connection) return;
+    const id = connectionIdOf(connection);
+    const name = connectionNameOf(connection);
+    if (!hasConnectionIdentity(id, name)) return;
+    // Configured connections retain distinct IDs. Routing rows with a stale or
+    // alternate ID for the same account are reconciled by name below.
+    const key = findKey(connection, false) || `name:${connectionNameKey(name)}`;
+    if (!key || key === "name:") return;
+    const current = merged.get(key) || {
+      connectionId: id,
+      name: name || (id ? String(id).slice(0, 8) : "connection"),
+      provider: provider.provider,
+      requests: 0,
+      tokens: 0,
+      failures: 0,
+    };
+    if (!current.connectionId && id) current.connectionId = id;
+    if (!current.name && name) current.name = name;
+    for (const field of ["requests", "tokens", "failures", "lastUsed", "testStatus", "cooldownUntil"]) {
+      if (connection[field] !== undefined && connection[field] !== null) current[field] = connection[field];
+    }
+    merged.set(key, current);
+    registerName(name, key);
+  };
+
+  for (const connection of configuredRows) addHistoricalConnection(connection);
+  for (const connection of routingProvider?.connections || []) {
+    const routingId = connectionIdOf(connection);
+    const routingName = connectionNameOf(connection);
+    if (!hasConnectionIdentity(routingId, routingName)) continue;
+    const key = findKey(connection, true) || `id:${routingId}`;
+    if (key === "id:null" || key === "id:undefined") {
+      addHistoricalConnection(connection);
+      continue;
+    }
+    const name = connectionNameOf(connection);
+    const id = connectionIdOf(connection);
+    const current = merged.get(key) || {
+      connectionId: id,
+      name: name || (id ? String(id).slice(0, 8) : "connection"),
+      provider: provider.provider,
+      requests: 0,
+      tokens: 0,
+      failures: 0,
+    };
+    if (!current.connectionId && id) current.connectionId = id;
+    if (!current.name && name) current.name = name;
+    for (const field of ["requests", "tokens", "failures", "lastUsed", "testStatus", "cooldownUntil"]) {
+      if (connection[field] !== undefined && connection[field] !== null) current[field] = connection[field];
+    }
+    merged.set(key, current);
+    registerName(name, key);
+  }
+
+  for (const row of topology.connectionRows.values()) {
+    if (row.provider !== providerKey || !hasConnectionIdentity(row.connectionId, row.connectionName)) continue;
+    const name = row.connectionName;
+    const key = findKey({ connectionId: row.connectionId, connectionName: name }, true)
+      || `id:${row.connectionId || connectionNameKey(name)}`;
+    const current = merged.get(key) || {
+      connectionId: row.connectionId,
+      name: name || (row.connectionId ? String(row.connectionId).slice(0, 8) : "connection"),
+      provider: provider.provider,
+      requests: 0,
+      tokens: 0,
+      failures: 0,
+    };
+    current.activeCount = row.activeCount;
+    current.sessionCount = row.sessionCount;
+    if (!current.connectionId && row.connectionId) current.connectionId = row.connectionId;
+    if (!current.name && name) current.name = name;
+    merged.set(key, current);
+    registerName(name, key);
+  }
+
+  for (const row of topology.liveRows?.values() || []) {
+    if (row.provider !== providerKey || !hasConnectionIdentity(row.connectionId, row.connectionName)) continue;
+    const key = findKey({ connectionId: row.connectionId, connectionName: row.connectionName }, true)
+      || `id:${row.connectionId || connectionNameKey(row.connectionName)}`;
+    const current = merged.get(key) || {
+      connectionId: row.connectionId,
+      name: row.connectionName,
+      provider: provider.provider,
+      requests: 0,
+      tokens: 0,
+      failures: 0,
+    };
+    current.liveRequests = (Number(current.liveRequests) || 0) + (Number(row.liveRequests) || 0);
+    current.liveTokens = (Number(current.liveTokens) || 0) + (Number(row.liveTokens) || 0);
+    if (row.failureAt && (!current.failureAt || row.failureAt >= current.failureAt)) {
+      current.failureAt = row.failureAt;
+      current.failureKind = row.failureKind;
+      current.failureMessage = row.failureMessage;
+    }
+    merged.set(key, current);
+    registerName(row.connectionName, key);
+  }
+
+  return [...merged.values()];
+}
+
 // Custom provider node - rectangle with image + name
 function ProviderNode({ data }) {
-  const { label, color, imageUrl, textIcon, active, connectionCount, requestCount, clickable, subtitle, role } = data;
+  const {
+    label,
+    color,
+    imageUrl,
+    textIcon,
+    active,
+    connectionCount,
+    requestCount,
+    sessionCount,
+    totalRequests,
+    totalTokens,
+    failureAt,
+    failureKind,
+    failureMessage,
+    clickable,
+    subtitle,
+    role,
+  } = data;
   const [imgError, setImgError] = useState(false);
   const isSource = role === "source";
+  const failureColor = failureKind === "warning" ? "#f59e0b" : "#ef4444";
+  const activityCount = Number(sessionCount) > 0 ? Number(sessionCount) : Number(requestCount) > 0 ? Number(requestCount) : 0;
+  const metricsSubtitle = Number(totalRequests) > 0 || Number(totalTokens) > 0
+    ? `${fmtCompact(totalRequests)} req · ${fmtCompact(totalTokens)} tok`
+    : subtitle;
   // Glow grows with the number of connections this provider is using.
   const boost = Math.max(0, Math.min(MAX_FLOW_BOOST, (Number(connectionCount) || 0) - 1));
   return (
     <div
-      className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg border-2 transition-all duration-300 bg-bg"
+      className={`relative flex items-center gap-2.5 px-4 py-2.5 rounded-lg border-2 transition-all duration-300 bg-bg ${failureAt ? "topology-failure-blink" : ""}`}
       style={{
-        borderColor: active ? color : "var(--color-border)",
-        boxShadow: active ? `0 0 ${16 + boost * 8}px ${color}${boost > 0 ? "66" : "40"}` : "none",
+        borderColor: failureAt ? failureColor : active ? color : "var(--color-border)",
+        boxShadow: failureAt
+          ? `0 0 0 2px ${failureColor}33, 0 0 18px ${failureColor}55`
+          : active ? `0 0 ${16 + boost * 8}px ${color}${boost > 0 ? "66" : "40"}` : "none",
         minWidth: "150px",
         cursor: clickable ? "pointer" : undefined,
       }}
+      title={failureAt ? failureMessage || "Recent routing failure" : undefined}
     >
       <Handle type="target" position={Position.Top} id="top" className="!bg-transparent !border-0 !w-0 !h-0" />
       <Handle type="target" position={Position.Bottom} id="bottom" className="!bg-transparent !border-0 !w-0 !h-0" />
@@ -100,21 +522,30 @@ function ProviderNode({ data }) {
       <div className="min-w-0">
         <span
           className="block text-base font-medium truncate"
-          style={{ color: active ? color : "var(--color-text)" }}
+          style={{ color: failureAt ? failureColor : active ? color : "var(--color-text)" }}
         >
           {label}
         </span>
-        {subtitle && <span className="block text-[11px] text-text-muted">{subtitle}</span>}
+        {metricsSubtitle && <span className="block text-[11px] text-text-muted">{metricsSubtitle}</span>}
       </div>
 
-      {/* Active indicator: connections in use for this provider, then ping dot */}
-      {active && connectionCount > 0 && (
+      {failureAt && (
+        <span
+          key={`${failureAt}-${failureKind}`}
+          className="topology-failure-pulse absolute -right-1 -top-1 size-2.5 rounded-full"
+          style={{ backgroundColor: failureColor, boxShadow: `0 0 10px ${failureColor}` }}
+          title={failureMessage || (failureKind === "warning" ? "Rate limit or subscription limit" : "Routing error")}
+        />
+      )}
+
+      {/* Active indicator: sessions are the primary count; connections remain secondary. */}
+      {active && activityCount > 0 && (
         <span
           className="shrink-0 rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums"
           style={{ backgroundColor: `${color}20`, color }}
-          title={`${connectionCount} connection${connectionCount > 1 ? "s" : ""} in use${requestCount > 0 ? ` · ${requestCount} in-flight request${requestCount > 1 ? "s" : ""}` : ""}`}
+          title={`${activityCount} active session${activityCount > 1 ? "s" : ""}${connectionCount > 0 ? ` · ${connectionCount} connection${connectionCount > 1 ? "s" : ""} in use` : ""}`}
         >
-          {connectionCount}
+          {activityCount}
         </span>
       )}
       {active && (
@@ -131,39 +562,66 @@ ProviderNode.propTypes = { data: PropTypes.object.isRequired };
 
 // One account inside a provider pool lane
 function ConnectionNode({ data }) {
-  const { label, requests, tokens, failures, lastUsed, testStatus, cooldownUntil, active, activeCount, clickable } = data;
-  const cooling = cooldownUntil && new Date(cooldownUntil).getTime() > Date.now();
-  const ok = !cooling && failures === 0 && testStatus !== "unavailable";
+  const {
+    label,
+    requests,
+    tokens,
+    lastUsed,
+    testStatus,
+    cooling = false,
+    active,
+    activeCount,
+    sessionCount,
+    failureAt,
+    failureKind,
+    failureMessage,
+    clickable,
+  } = data;
+  const ok = !cooling && testStatus !== "unavailable";
+  const activityCount = Number(sessionCount) > 0 ? Number(sessionCount) : Number(activeCount) > 0 ? Number(activeCount) : 0;
+  const failureColor = failureKind === "warning" ? "#f59e0b" : "#ef4444";
   return (
     <div
-      className="flex min-w-[180px] max-w-[220px] items-center gap-2 rounded-lg border bg-bg px-3 py-2 transition-colors"
+      className={`relative flex min-w-[180px] max-w-[220px] items-center gap-2 rounded-lg border bg-bg px-3 py-2 transition-colors ${failureAt ? "topology-failure-blink" : ""}`}
       style={{
-        borderColor: active ? "#22d3ee" : cooling ? "#f59e0b" : "var(--color-border)",
-        boxShadow: active ? "0 0 12px #22d3ee40" : "none",
+        borderColor: failureAt ? failureColor : active ? "#22d3ee" : cooling ? "#f59e0b" : "var(--color-border)",
+        boxShadow: failureAt ? `0 0 0 2px ${failureColor}33, 0 0 14px ${failureColor}55` : active ? "0 0 12px #22d3ee40" : "none",
         cursor: clickable ? "pointer" : undefined,
       }}
+      title={failureAt ? failureMessage || "Recent routing failure" : undefined}
     >
       <Handle type="target" position={Position.Left} id="left" className="!bg-transparent !border-0 !w-0 !h-0" />
-      <span className={`block size-2 shrink-0 rounded-full ${active ? "bg-cyan-400" : cooling ? "bg-warning" : ok ? "bg-emerald-500" : "bg-danger"}`} />
+      <Handle type="target" position={Position.Right} id="right" className="!bg-transparent !border-0 !w-0 !h-0" />
+      <Handle type="target" position={Position.Top} id="top" className="!bg-transparent !border-0 !w-0 !h-0" />
+      <Handle type="target" position={Position.Bottom} id="bottom" className="!bg-transparent !border-0 !w-0 !h-0" />
+      <span className={`block size-2 shrink-0 rounded-full ${failureAt ? (failureKind === "warning" ? "bg-warning" : "bg-danger") : active ? "bg-cyan-400" : cooling ? "bg-warning" : ok ? "bg-emerald-500" : "bg-danger"}`} />
       <div className="min-w-0 flex-1">
         <span className="block truncate font-mono text-xs text-text-main">{label}</span>
         <span className="block text-[10px] text-text-muted">
           {fmtCompact(requests)} req
+          {sessionCount > 0 ? ` · ${sessionCount} live session${sessionCount > 1 ? "s" : ""}` : ""}
           {tokens > 0 ? ` · ${fmtCompact(tokens)} tok` : ""}
-          {failures > 0 ? ` · ${failures} failed` : ""}
           {lastUsed ? ` · ${fmtTime(lastUsed)}` : ""}
         </span>
       </div>
-      {active && activeCount > 0 && (
+      {active && activityCount > 0 && (
         <span
           className="shrink-0 rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-cyan-600 dark:text-cyan-400"
-          title={`${activeCount} in-flight request${activeCount > 1 ? "s" : ""}`}
+          title={`${activityCount} active session${activityCount > 1 ? "s" : ""}`}
         >
-          {activeCount}
+          {activityCount}
         </span>
       )}
       {cooling && (
         <span className="shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning">cooling</span>
+      )}
+      {failureAt && (
+        <span
+          key={`${failureAt}-${failureKind}`}
+          className="topology-failure-pulse absolute -right-1 -top-1 size-2.5 rounded-full"
+          style={{ backgroundColor: failureColor, boxShadow: `0 0 10px ${failureColor}` }}
+          title={failureMessage || (failureKind === "warning" ? "Rate limit or subscription limit" : "Routing error")}
+        />
       )}
     </div>
   );
@@ -397,136 +855,340 @@ const nodeTypes = {
 };
 const edgeTypes = { topology: TopologyEdge };
 
-const EDGE_STYLE = (active, last, error) => {
+const EDGE_STYLE = (active, last, error, warning = false) => {
   if (error) return { stroke: "#ef4444", strokeWidth: 2.5, opacity: 0.9 };
+  if (warning) return { stroke: "#f59e0b", strokeWidth: 2.5, opacity: 0.9 };
   if (active) return { stroke: "#22d3ee", strokeWidth: 3.5, opacity: 1 };
   if (last) return { stroke: "#f59e0b", strokeWidth: 2, opacity: 0.7 };
   return { stroke: "var(--color-border)", strokeWidth: 1, opacity: 0.3 };
 };
 
-// Place N nodes evenly along an ellipse around the router center.
+// Circular provider graph with directional connection branches and collision relaxation.
 function buildProvidersLayout(
   providers,
   activeSet,
   lastSet,
-  errorSet,
   clickable = false,
   activeConnections = new Map(),
-  activeRequestCounts = new Map()
+  activeRequestCounts = new Map(),
+  routingProviders = [],
+  sessionTopology = { byProvider: new Map(), connectionRows: new Map() },
+  configuredConnections = new Map(),
+  positionOverrides = new Map()
 ) {
-  const nodeW = 180;
-  const nodeH = 30;
+  const TAU = Math.PI * 2;
   const routerW = 120;
   const routerH = 44;
-  const nodeGap = 24;
-  const count = providers.length;
+  const providerW = 180;
+  const providerH = 64;
+  const connectionW = 210;
+  const connectionH = 48;
+  const totalActiveRequests = [...activeRequestCounts.values()].reduce((sum, value) => sum + value, 0);
+  const providerRows = Array.isArray(providers) ? providers.filter((provider) => provider?.provider) : [];
 
-  const minRx = ((nodeW + nodeGap) * count) / (2 * Math.PI);
-  const rx = Math.max(320, minRx);
-  const ry = Math.max(200, rx * 0.55);
-  if (count === 0) {
+  if (providerRows.length === 0) {
     return {
-      nodes: [{ id: "router", type: "router", position: { x: 0, y: 0 }, data: { activeCount: 0 }, draggable: false }],
+      nodes: [{ id: "router", type: "router", position: { x: -routerW / 2, y: -routerH / 2 }, data: { activeCount: 0, activeRequests: 0 }, draggable: false }],
       edges: [],
     };
   }
 
-  const nodes = [];
-  const edges = [];
-  const totalActiveRequests = [...activeRequestCounts.values()].reduce((sum, value) => sum + value, 0);
-  nodes.push({
+  const descriptors = providerRows.map((provider) => {
+    const providerKey = normalizeProviderId(provider.provider);
+    const routingProvider = (Array.isArray(routingProviders) ? routingProviders : [])
+      .find((row) => normalizeProviderId(row.provider) === providerKey);
+    return {
+      provider,
+      providerKey,
+      routingProvider,
+      connections: mergeProviderConnections(
+        provider,
+        routingProvider,
+        sessionTopology,
+        configuredConnections.get(providerKey) || []
+      ),
+      weight: 1,
+    };
+  });
+  const providerRadius = Math.max(
+    300,
+    ((providerW + 90) * descriptors.length) / TAU,
+    130 * Math.sqrt(descriptors.length)
+  );
+  let cursor = -Math.PI / 2;
+
+  for (const descriptor of descriptors) {
+    descriptor.angle = cursor + Math.PI / descriptors.length;
+    descriptor.providerPosition = {
+      x: Math.cos(descriptor.angle) * providerRadius,
+      y: Math.sin(descriptor.angle) * providerRadius,
+    };
+    cursor += TAU / descriptors.length;
+  }
+
+  const nodes = [{
     id: "router",
     type: "router",
     position: { x: -routerW / 2, y: -routerH / 2 },
     data: { activeCount: activeSet.size, activeRequests: totalActiveRequests },
     draggable: false,
-  });
+  }];
+  const edges = [];
+  const collisionNodes = [];
+  const desiredPositions = new Map();
 
-  providers.forEach((p, i) => {
-    const config = getProviderConfig(p.provider);
-    const active = activeSet.has(p.provider?.toLowerCase());
-    const last = !active && lastSet.has(p.provider?.toLowerCase());
-    const error = !active && errorSet.has(p.provider?.toLowerCase());
-    const nodeId = `provider-${p.provider}`;
-    const providerKey = (p.provider || "").toLowerCase();
+  for (const descriptor of descriptors) {
+    const { provider, providerKey, routingProvider, connections } = descriptor;
+    const config = getProviderConfig(provider.provider);
+    const active = activeSet.has(providerKey);
+    const last = !active && lastSet.has(providerKey);
+    const providerId = `provider-${provider.provider}`;
     const connectionCount = activeConnections.get(providerKey)?.size || 0;
     const requestCount = activeRequestCounts.get(providerKey) || 0;
-    const data = {
-      label: (config.name !== p.provider ? config.name : null) || p.nodeName || p.name || p.provider,
-      color: config.color || "#6b7280",
-      imageUrl: getProviderImageUrl(p.provider),
-      textIcon: config.textIcon || (p.provider || "?").slice(0, 2).toUpperCase(),
-      active,
-      connectionCount,
-      requestCount,
-      clickable,
-    };
-
-    const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
-    const cx = rx * Math.cos(angle);
-    const cy = ry * Math.sin(angle);
-
-    let sourceHandle, targetHandle;
-    if (Math.abs(angle + Math.PI / 2) < Math.PI / 4 || Math.abs(angle - 3 * Math.PI / 2) < Math.PI / 4) {
-      sourceHandle = "top"; targetHandle = "bottom";
-    } else if (Math.abs(angle - Math.PI / 2) < Math.PI / 4) {
-      sourceHandle = "bottom"; targetHandle = "top";
-    } else if (cx > 0) {
-      sourceHandle = "right"; targetHandle = "left";
-    } else {
-      sourceHandle = "left"; targetHandle = "right";
-    }
+    const sessionCount = sessionTopology.byProvider.get(providerKey)?.size || 0;
+    const baseRequests = Number(routingProvider?.requests) || connections.reduce((sum, connection) => sum + (Number(connection.requests) || 0), 0);
+    const baseTokens = Number(routingProvider?.tokens) || connections.reduce((sum, connection) => sum + (Number(connection.tokens) || 0), 0);
+    const liveMetrics = sessionTopology.metricsByProvider?.get(providerKey) || { requests: 0, tokens: 0 };
+    const totalRequests = baseRequests + (Number(liveMetrics.requests) || 0);
+    const totalTokens = baseTokens + (Number(liveMetrics.tokens) || 0);
+    const failure = sessionTopology.failuresByProvider?.get(providerKey);
 
     nodes.push({
-      id: nodeId,
+      id: providerId,
       type: "provider",
-      position: { x: cx - nodeW / 2, y: cy - nodeH / 2 },
-      data,
+      position: { x: descriptor.providerPosition.x - providerW / 2, y: descriptor.providerPosition.y - providerH / 2 },
+      data: {
+        label: (config.name !== provider.provider ? config.name : null) || provider.nodeName || provider.name || provider.provider,
+        color: config.color || "#6b7280",
+        imageUrl: getProviderImageUrl(provider.provider),
+        textIcon: config.textIcon || (provider.provider || "?").slice(0, 2).toUpperCase(),
+        active,
+        connectionCount,
+        requestCount,
+        sessionCount,
+        totalRequests,
+        totalTokens,
+        failureAt: failure?.at || 0,
+        failureKind: failure?.kind || null,
+        failureMessage: failure?.message || null,
+        role: connections.length > 0 ? "source" : undefined,
+        clickable,
+      },
       draggable: false,
     });
+    collisionNodes.push({ id: providerId, kind: "provider", x: descriptor.providerPosition.x, y: descriptor.providerPosition.y, radius: Math.max(providerW, providerH) / 2 });
+
+    const radialX = Math.cos(descriptor.angle);
+    const radialY = Math.sin(descriptor.angle);
+    const tangentX = -radialY;
+    const tangentY = radialX;
+    // Group connections into a compact two- or three-row block behind the
+    // provider. The block follows the provider's radial direction, while the
+    // rows themselves provide the inline fan needed for multiple accounts.
+    const maxColumns = 3;
+    const columns = Math.min(maxColumns, Math.max(2, Math.ceil(connections.length / 2)));
+    const rowForwardGap = Math.abs(radialX) * connectionH + Math.abs(radialY) * connectionW + 30;
+    const columnLateralGap = Math.abs(tangentX) * connectionW + Math.abs(tangentY) * connectionH + 30;
+    connections.forEach((connection, connectionIndex) => {
+      const connectionId = `session-${provider.provider}-${connection.connectionId || connection.name || connectionIndex}`;
+      const row = Math.floor(connectionIndex / columns);
+      const slot = connectionIndex % columns;
+      const slotsInRow = Math.min(columns, connections.length - row * columns);
+      const forward = 220 + row * rowForwardGap;
+      const lateral = (slot - (slotsInRow - 1) / 2) * columnLateralGap;
+      const center = {
+        x: descriptor.providerPosition.x + radialX * forward + tangentX * lateral,
+        y: descriptor.providerPosition.y + radialY * forward + tangentY * lateral,
+      };
+      const position = { x: center.x - connectionW / 2, y: center.y - connectionH / 2 };
+      const sessionCountForConnection = Number(connection.sessionCount) || 0;
+      const activeCountForConnection = Number(connection.activeCount) || 0;
+      const connectionActive = sessionCountForConnection > 0 || activeCountForConnection > 0;
+      const requestTotal = (Number(connection.requests) || 0) + (Number(connection.liveRequests) || 0);
+      const tokenTotalForConnection = (Number(connection.tokens) || 0) + (Number(connection.liveTokens) || 0);
+      const failure = connection.failureAt
+        ? { at: connection.failureAt, kind: connection.failureKind, message: connection.failureMessage }
+        : null;
+
+      nodes.push({
+        id: connectionId,
+        type: "connection",
+        position,
+        data: {
+          label: connection.name || connection.connectionId?.slice(0, 8) || "connection",
+          provider: provider.provider,
+          connectionId: connection.connectionId,
+          requests: requestTotal,
+          tokens: tokenTotalForConnection,
+          failures: connection.failures || 0,
+          lastUsed: connection.lastUsed,
+          testStatus: connection.testStatus,
+          cooldownUntil: connection.cooldownUntil,
+          cooling: Boolean(connection.cooldownUntil && new Date(connection.cooldownUntil).getTime() > Date.now()),
+          active: connectionActive,
+          activeCount: activeCountForConnection,
+          sessionCount: sessionCountForConnection,
+          failureAt: failure?.at || 0,
+          failureKind: failure?.kind || null,
+          failureMessage: failure?.message || null,
+          clickable: true,
+        },
+        draggable: false,
+      });
+      desiredPositions.set(connectionId, center);
+      collisionNodes.push({ id: connectionId, kind: "connection", x: center.x, y: center.y, radius: Math.max(connectionW, connectionH) / 2 });
+    });
+  }
+
+  // Relax only the child fan-out. Providers remain anchored to the expanding
+  // circle, while nearby children are pushed apart instead of overlapping.
+  for (let iteration = 0; iteration < 18; iteration += 1) {
+    for (let leftIndex = 0; leftIndex < collisionNodes.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < collisionNodes.length; rightIndex += 1) {
+        const left = collisionNodes[leftIndex];
+        const right = collisionNodes[rightIndex];
+        const dx = right.x - left.x;
+        const dy = right.y - left.y;
+        const distance = Math.hypot(dx, dy) || 0.01;
+        const minimum = left.radius + right.radius + 26;
+        if (distance >= minimum) continue;
+        const push = (minimum - distance) / 2;
+        const nx = dx / distance;
+        const ny = dy / distance;
+        left.x -= nx * push;
+        left.y -= ny * push;
+        right.x += nx * push;
+        right.y += ny * push;
+      }
+    }
+
+    for (const collisionNode of collisionNodes) {
+      if (collisionNode.kind === "provider") {
+        const length = Math.hypot(collisionNode.x, collisionNode.y) || 1;
+        collisionNode.x = (collisionNode.x / length) * providerRadius;
+        collisionNode.y = (collisionNode.y / length) * providerRadius;
+      } else {
+        const desired = desiredPositions.get(collisionNode.id);
+        if (desired) {
+          collisionNode.x += (desired.x - collisionNode.x) * 0.08;
+          collisionNode.y += (desired.y - collisionNode.y) * 0.08;
+        }
+      }
+    }
+  }
+
+  const collisionById = new Map(collisionNodes.map((node) => [node.id, node]));
+  for (const node of nodes) {
+    if (node.id === "router") continue;
+    const override = positionOverrides.get(node.id);
+    if (override) {
+      node.position = { ...override };
+      continue;
+    }
+    const collision = collisionById.get(node.id);
+    if (!collision) continue;
+    const width = node.type === "provider" ? providerW : connectionW;
+    const height = node.type === "provider" ? providerH : connectionH;
+    node.position = { x: collision.x - width / 2, y: collision.y - height / 2 };
+  }
+
+  const handleFor = (dx, dy, source = false) => {
+    const handle = Math.abs(dx) >= Math.abs(dy)
+      ? (dx >= 0 ? "right" : "left")
+      : (dy >= 0 ? "bottom" : "top");
+    return source ? `out-${handle}` : handle;
+  };
+
+  for (const descriptor of descriptors) {
+    const providerId = `provider-${descriptor.provider.provider}`;
+    const providerNode = nodes.find((node) => node.id === providerId);
+    const providerCenter = { x: providerNode.position.x + providerW / 2, y: providerNode.position.y + providerH / 2 };
+    const providerFailure = sessionTopology.failuresByProvider?.get(descriptor.providerKey);
     edges.push({
-      id: `e-${nodeId}`,
+      id: `e-${providerId}`,
       type: "topology",
       source: "router",
-      sourceHandle,
-      target: nodeId,
-      targetHandle,
+      sourceHandle: handleFor(providerCenter.x, providerCenter.y),
+      target: providerId,
+      targetHandle: handleFor(-providerCenter.x, -providerCenter.y),
       animated: false,
-      data: { active, intensity: connectionCount },
-      style: EDGE_STYLE(active, last, error),
+      data: { active: activeSet.has(descriptor.providerKey), intensity: Math.max(1, sessionTopology.byProvider.get(descriptor.providerKey)?.size || 0) },
+      style: EDGE_STYLE(
+        activeSet.has(descriptor.providerKey),
+        lastSet.has(descriptor.providerKey),
+        providerFailure?.kind === "error",
+        providerFailure?.kind === "warning"
+      ),
     });
-  });
+
+    for (const [connectionIndex, connection] of descriptor.connections.entries()) {
+      const connectionId = `session-${descriptor.provider.provider}-${connection.connectionId || connection.name || connectionIndex}`;
+      const connectionNode = nodes.find((node) => node.id === connectionId);
+      if (!connectionNode) continue;
+      const connectionCenter = { x: connectionNode.position.x + connectionW / 2, y: connectionNode.position.y + connectionH / 2 };
+      const dx = connectionCenter.x - providerCenter.x;
+      const dy = connectionCenter.y - providerCenter.y;
+      const connectionActive = connectionNode.data.active;
+      edges.push({
+        id: `e-${providerId}-${connectionId}`,
+        type: "topology",
+        source: providerId,
+        sourceHandle: handleFor(dx, dy, true),
+        target: connectionId,
+        targetHandle: handleFor(-dx, -dy),
+        animated: false,
+        data: { active: connectionActive, intensity: Math.max(1, connectionNode.data.sessionCount, connectionNode.data.activeCount) },
+        label: connectionNode.data.sessionCount > 0
+          ? `${connectionNode.data.sessionCount} session${connectionNode.data.sessionCount > 1 ? "s" : ""}`
+          : connectionNode.data.requests > 0 ? `${fmtCompact(connectionNode.data.requests)} req` : undefined,
+        style: EDGE_STYLE(
+          connectionActive,
+          false,
+          connectionNode.data.failureKind === "error"
+            || (!connectionActive && connectionNode.data.testStatus === "unavailable"),
+          connectionNode.data.failureKind === "warning" || connectionNode.data.cooling
+        ),
+      });
+    }
+  }
 
   return { nodes, edges };
 }
 
-// Lanes: each provider on the left, its accounts stacked to the right.
-function buildPoolsLayout(providers, activeRequests = []) {
+// Pools mode: each provider on the left, its accounts stacked to the right.
+function buildPoolsLayout(providers, activeRequests = [], sessionTopology = {}) {
   const nodes = [];
   const edges = [];
   const laneGap = 28;
   const connGap = 58;
   const providerNodeH = 56;
 
-  // account names currently serving a request, keyed by provider
-  const activeAccounts = new Set(
-    (activeRequests || []).map((r) => `${(r.provider || "").toLowerCase()}|${r.account || ""}`)
-  );
-  // in-flight request count per account (same account can serve several sessions)
-  const activeCounts = new Map();
+  // Active requests can identify an account by UUID or display name. Keep both
+  // forms so a live request highlights the same pool node as the live canvas.
+  const activeRequestsByProvider = new Map();
   for (const request of activeRequests || []) {
-    const key = `${(request.provider || "").toLowerCase()}|${request.account || ""}`;
-    const count = Number(request.count) > 0 ? Number(request.count) : 1;
-    activeCounts.set(key, (activeCounts.get(key) || 0) + count);
+    const providerKey = normalizeProviderId(request.provider);
+    const rows = activeRequestsByProvider.get(providerKey) || [];
+    rows.push(request);
+    activeRequestsByProvider.set(providerKey, rows);
   }
 
   let y = 0;
-  for (const provider of providers) {
+  const providerRows = Array.isArray(providers) ? providers.filter((provider) => provider?.provider) : [];
+  for (const provider of providerRows) {
     const config = getProviderConfig(provider.provider);
-    const connections = provider.connections || [];
+    const connections = Array.isArray(provider.connections) ? provider.connections : [];
     const laneHeight = Math.max(providerNodeH, connections.length * connGap);
     const laneCenter = y + laneHeight / 2;
     const providerId = `pool-provider-${provider.provider}`;
+    const providerKey = normalizeProviderId(provider.provider);
+    const providerActiveRequests = activeRequestsByProvider.get(providerKey) || [];
+    const liveMetrics = sessionTopology.metricsByProvider?.get(providerKey) || { requests: 0, tokens: 0 };
+    const providerFailure = sessionTopology.failuresByProvider?.get(providerKey);
+    const baseRequests = Number(provider.requests) || connections.reduce((sum, connection) => sum + (Number(connection.requests) || 0), 0);
+    const baseTokens = Number(provider.tokens) || connections.reduce((sum, connection) => sum + (Number(connection.tokens) || 0), 0);
+    const totalRequests = baseRequests + (Number(liveMetrics.requests) || 0);
+    const totalTokens = baseTokens + (Number(liveMetrics.tokens) || 0);
 
     nodes.push({
       id: providerId,
@@ -534,11 +1196,16 @@ function buildPoolsLayout(providers, activeRequests = []) {
       position: { x: 0, y: laneCenter - providerNodeH / 2 },
       data: {
         label: provider.name || provider.provider,
-        subtitle: `${fmtCompact(provider.tokens)} tok · ${provider.failures} failed`,
+        subtitle: `${fmtCompact(totalRequests)} req · ${fmtCompact(totalTokens)} tok`,
         color: config.color || "#6b7280",
         imageUrl: getProviderImageUrl(provider.provider),
         textIcon: config.textIcon || provider.provider.slice(0, 2).toUpperCase(),
-        active: activeSet.has(provider.provider?.toLowerCase()),
+        active: providerActiveRequests.length > 0 || sessionTopology.byProvider?.has(providerKey),
+        totalRequests,
+        totalTokens,
+        failureAt: providerFailure?.at || 0,
+        failureKind: providerFailure?.kind || null,
+        failureMessage: providerFailure?.message || null,
         clickable: true,
         role: "source",
       },
@@ -548,8 +1215,28 @@ function buildPoolsLayout(providers, activeRequests = []) {
     connections.forEach((conn, index) => {
       const connId = `conn-${provider.provider}-${conn.connectionId || index}`;
       const accountName = conn.name || conn.connectionId?.slice(0, 8) || "account";
-      const accountKey = `${(provider.provider || "").toLowerCase()}|${accountName}`;
-      const active = activeAccounts.has(accountKey);
+      const liveRow = [...(sessionTopology.liveRows?.values() || [])].find((row) => (
+        row.provider === providerKey
+        && (
+          (conn.connectionId && row.connectionId === conn.connectionId)
+          || connectionNameKey(row.connectionName) === connectionNameKey(accountName)
+        )
+      ));
+      const requestTotal = (Number(conn.requests) || 0) + (Number(liveRow?.liveRequests) || 0);
+      const tokenTotalForConnection = (Number(conn.tokens) || 0) + (Number(liveRow?.liveTokens) || 0);
+      const active = providerActiveRequests.some((request) => (
+        (conn.connectionId && request.connectionId === conn.connectionId)
+        || connectionNameKey(request.account || request.connectionName) === connectionNameKey(accountName)
+      ));
+      const activeCount = providerActiveRequests
+        .filter((request) => (
+          (conn.connectionId && request.connectionId === conn.connectionId)
+          || connectionNameKey(request.account || request.connectionName) === connectionNameKey(accountName)
+        ))
+        .reduce((sum, request) => sum + (Number(request.count) > 0 ? Number(request.count) : 1), 0);
+      const failure = liveRow?.failureAt
+        ? { at: liveRow.failureAt, kind: liveRow.failureKind, message: liveRow.failureMessage }
+        : null;
       nodes.push({
         id: connId,
         type: "connection",
@@ -558,14 +1245,18 @@ function buildPoolsLayout(providers, activeRequests = []) {
           label: accountName,
           provider: provider.provider,
           connectionId: conn.connectionId,
-          requests: conn.requests || 0,
-          tokens: conn.tokens || 0,
+          requests: requestTotal,
+          tokens: tokenTotalForConnection,
           failures: conn.failures || 0,
           lastUsed: conn.lastUsed,
           testStatus: conn.testStatus,
           cooldownUntil: conn.cooldownUntil,
+          cooling: Boolean(conn.cooldownUntil && new Date(conn.cooldownUntil).getTime() > Date.now()),
           active,
-          activeCount: activeCounts.get(accountKey) || 0,
+          activeCount,
+          failureAt: failure?.at || 0,
+          failureKind: failure?.kind || null,
+          failureMessage: failure?.message || null,
           clickable: true,
         },
         draggable: false,
@@ -578,9 +1269,15 @@ function buildPoolsLayout(providers, activeRequests = []) {
         target: connId,
         targetHandle: "left",
         animated: false,
-        data: { active, intensity: activeCounts.get(accountKey) || 0 },
-        label: conn.requests ? `${fmtCompact(conn.requests)} req` : undefined,
-        style: EDGE_STYLE(active, false, (conn.failures || 0) > 0 && !active),
+        data: { active, intensity: activeCount },
+        label: requestTotal ? `${fmtCompact(requestTotal)} req` : undefined,
+        style: EDGE_STYLE(
+          active,
+          false,
+          failure?.kind === "error" || (!active && conn.testStatus === "unavailable"),
+          failure?.kind === "warning"
+            || Boolean(conn.cooldownUntil && new Date(conn.cooldownUntil).getTime() > Date.now())
+        ),
       });
     });
 
@@ -699,14 +1396,26 @@ function getImageUrlSafe(providerId) {
 // Fall back to a single synthetic connection per provider when routing data
 // has not been recorded for this window yet.
 function providersToPoolRows(providers, routing) {
-  if (routing?.providers?.length) return routing.providers;
-  return (providers || []).map((p) => ({
-    provider: p.provider,
-    name: getProviderConfig(p.provider).name || p.name || p.provider,
+  const configured = (Array.isArray(providers) ? providers : []).filter((provider) => provider?.provider);
+  const configuredByProvider = new Map(configured.map((provider) => [normalizeProviderId(provider.provider), provider]));
+  if (Array.isArray(routing?.providers) && routing.providers.length) {
+    return routing.providers.map((row) => {
+      const provider = configuredByProvider.get(normalizeProviderId(row.provider));
+      const connections = new Map();
+      for (const connection of [...(provider?.connections || []), ...(row.connections || [])]) {
+        const key = connection.connectionId || connection.id || connection.name;
+        if (key) connections.set(key, { ...connection, connectionId: connection.connectionId || connection.id || null });
+      }
+      return { ...row, connections: [...connections.values()] };
+    });
+  }
+  return configured.map((provider) => ({
+    provider: provider.provider,
+    name: getProviderConfig(provider.provider).name || provider.name || provider.provider,
     requests: 0,
     tokens: 0,
     failures: 0,
-    connections: p.id ? [{ connectionId: p.id, name: p.name || p.id, requests: 0, tokens: 0, failures: 0 }] : [],
+    connections: provider.connections || (provider.id ? [{ connectionId: provider.id, name: provider.name || provider.id, requests: 0, tokens: 0, failures: 0 }] : []),
   }));
 }
 
@@ -714,7 +1423,6 @@ export default function ProviderTopology({
   providers = [],
   activeRequests = [],
   lastProvider = "",
-  errorProvider = "",
   period = "7d",
   onSelectProvider,
   onSelectConnection,
@@ -723,42 +1431,22 @@ export default function ProviderTopology({
 }) {
   const [mode, setMode] = useState("providers");
   const [routing, setRouting] = useState(null);
+  const [routingSnapshot, setRoutingSnapshot] = useState({ period: null, at: 0 });
+  const [liveRequests, setLiveRequests] = useState([]);
+  const routingLoadedAt = routingSnapshot.period === period ? routingSnapshot.at : 0;
 
   const activeKey = useMemo(
-    () => activeRequests.map((r) => r.provider?.toLowerCase()).filter(Boolean).sort().join(","),
-    [activeRequests]
+    () => [...new Set([
+      ...activeRequests.map((r) => normalizeProviderId(r.provider)).filter(Boolean),
+      ...activeLiveRequests(liveRequests).map((r) => normalizeProviderId(r.provider)).filter(Boolean),
+    ])].sort().join(","),
+    [activeRequests, liveRequests]
   );
-  const lastKey = lastProvider?.toLowerCase() || "";
-  const errorKey = errorProvider?.toLowerCase() || "";
+  const lastKey = lastProvider ? normalizeProviderId(lastProvider) : "";
   const rawActiveSet = useMemo(() => new Set(activeKey ? activeKey.split(",") : []), [activeKey]);
   const lastSet = useMemo(() => new Set(lastKey ? [lastKey] : []), [lastKey]);
-  const errorSet = useMemo(() => new Set(errorKey ? [errorKey] : []), [errorKey]);
 
-  const firstSeenRef = useRef({});
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    const seen = firstSeenRef.current;
-    const now = Date.now();
-    for (const p of rawActiveSet) if (!seen[p]) seen[p] = now;
-    for (const p of Object.keys(seen)) if (!rawActiveSet.has(p)) delete seen[p];
-  }, [rawActiveSet]);
-
-  useEffect(() => {
-    if (rawActiveSet.size === 0) return;
-    const id = setInterval(() => setTick((t) => t + 1), FE_ACTIVE_TICK_MS);
-    return () => clearInterval(id);
-  }, [rawActiveSet]);
-
-  const activeSet = useMemo(() => {
-    const now = Date.now();
-    const filtered = new Set();
-    for (const p of rawActiveSet) {
-      const ts = firstSeenRef.current[p];
-      if (!ts || now - ts < FE_ACTIVE_TIMEOUT_MS) filtered.add(p);
-    }
-    return filtered;
-  }, [rawActiveSet, tick]);
+  const activeSet = rawActiveSet;
 
   // In-flight requests per provider and per connection, plus the distinct
   // connections (accounts) each provider is using. One active entry is per
@@ -768,7 +1456,7 @@ export default function ProviderTopology({
     const connectionsByProvider = new Map();
     let total = 0;
     for (const request of activeRequests || []) {
-      const provider = (request.provider || "").toLowerCase();
+      const provider = normalizeProviderId(request.provider);
       if (!provider) continue;
       const count = Number(request.count) > 0 ? Number(request.count) : 1;
       total += count;
@@ -778,56 +1466,146 @@ export default function ProviderTopology({
         accounts = new Set();
         connectionsByProvider.set(provider, accounts);
       }
-      accounts.add(request.account || "unknown");
+      accounts.add(request.connectionId || request.account || "unknown");
     }
     return { requestsByProvider, connectionsByProvider, total };
   }, [activeRequests]);
 
-  // Routing data powers pools + combos modes.
   useEffect(() => {
-    if (mode === "providers") return;
+    let cancelled = false;
+    let streamConnected = false;
+    let stream;
+    const applyPayload = (payload) => {
+      if (!cancelled && payload && !payload.error && Array.isArray(payload.requests)) {
+        setLiveRequests(payload.requests);
+      }
+    };
+    const load = () => {
+      fetch("/api/usage/live-requests", { cache: "no-store" })
+        .then((res) => {
+          if (!res.ok) throw new Error(`Live requests failed: ${res.status}`);
+          return res.json();
+        })
+        .then(applyPayload)
+        .catch(() => {});
+    };
+
+    // The stream pushes a snapshot and then one coalesced update for every
+    // routing event. Keep the REST poll as a recovery path for older browsers
+    // or a temporarily unavailable SSE connection.
+    load();
+    try {
+      stream = new EventSource("/api/usage/live-requests/stream");
+      const handleStreamEvent = (event) => {
+        streamConnected = true;
+        try {
+          applyPayload(JSON.parse(event.data));
+        } catch {
+          // Ignore malformed frames; the next update still carries a full view.
+        }
+      };
+      stream.addEventListener("snapshot", handleStreamEvent);
+      stream.addEventListener("update", handleStreamEvent);
+      stream.onopen = () => { streamConnected = true; };
+      stream.onerror = () => { streamConnected = false; };
+    } catch {
+      stream = null;
+    }
+
+    const fallbackTimer = setInterval(() => {
+      if (!streamConnected) load();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(fallbackTimer);
+      stream?.close();
+    };
+  }, []);
+
+  const sessionTopology = useMemo(
+    () => buildSessionTopology(liveRequests, activeRequests, routingLoadedAt),
+    [liveRequests, activeRequests, routingLoadedAt]
+  );
+
+  // Routing data powers the provider fan-out as well as pools + combos.
+  useEffect(() => {
     let cancelled = false;
     fetch(`/api/usage/routing?period=${encodeURIComponent(period)}`)
-      .then((res) => res.json())
-      .then((payload) => { if (!cancelled && payload && !payload.error) setRouting(payload); })
-      .catch(() => {});
+      .then((res) => {
+        if (!res.ok) throw new Error(`Routing data failed: ${res.status}`);
+        return res.json();
+      })
+      .then((payload) => {
+        if (cancelled) return;
+        if (payload && !payload.error) setRouting(payload);
+        setRoutingSnapshot({ period, at: Date.now() });
+      })
+      .catch(() => {
+        if (!cancelled) setRoutingSnapshot({ period, at: Date.now() });
+      });
     return () => { cancelled = true; };
-  }, [mode, period]);
+  }, [period]);
 
   const routingLoading = mode !== "providers" && routing === null;
 
   const clickableProviders = typeof onSelectProvider === "function";
-
-  const graph = useMemo(() => {
-    if (mode === "pools") {
-      const rows = providersToPoolRows(providers, routing);
-      return buildPoolsLayout(rows, activeRequests);
+  const configuredConnections = useMemo(() => {
+    const map = new Map();
+    for (const provider of Array.isArray(providers) ? providers : []) {
+      if (!provider?.provider) continue;
+      map.set(normalizeProviderId(provider.provider), Array.isArray(provider.connections) ? provider.connections : []);
     }
-    if (mode === "combos") {
-      return buildCombosLayout(routing?.combos || []);
-    }
-    return buildProvidersLayout(
-      providers,
-      activeSet,
-      lastSet,
-      errorSet,
-      clickableProviders,
-      activeTotals.connectionsByProvider,
-      activeTotals.requestsByProvider
-    );
-  }, [mode, providers, routing, activeSet, lastSet, errorSet, clickableProviders, activeRequests, activeTotals]);
+    return map;
+  }, [providers]);
 
-  const graphKey = useMemo(
-    () => `${mode}:${graph.nodes.length}:${providers.map((p) => p.provider).sort().join(",")}`,
-    [mode, graph.nodes.length, providers]
+  // Compute the structural layout only from configured/historical connections.
+  // Live request state can then update badges and edges without recalculating
+  // the position of any node already visible on the canvas.
+  const stableProviderLayout = useMemo(() => buildProvidersLayout(
+    providers,
+    new Set(),
+    new Set(),
+    clickableProviders,
+    new Map(),
+    new Map(),
+    routing?.providers || [],
+    { byProvider: new Map(), connectionRows: new Map() },
+    configuredConnections
+  ), [providers, routing, configuredConnections, clickableProviders]);
+  const stableNodePositions = useMemo(
+    () => new Map(stableProviderLayout.nodes.map((node) => [node.id, node.position])),
+    [stableProviderLayout]
   );
 
+  const graph = useMemo(() => {
+    let nextGraph;
+    if (mode === "pools") {
+      const rows = providersToPoolRows(providers, routing);
+      nextGraph = buildPoolsLayout(rows, activeRequests, sessionTopology);
+    } else if (mode === "combos") {
+      nextGraph = buildCombosLayout(routing?.combos || []);
+    } else {
+      nextGraph = buildProvidersLayout(
+        providers,
+        activeSet,
+        lastSet,
+        clickableProviders,
+        activeTotals.connectionsByProvider,
+        activeTotals.requestsByProvider,
+        routing?.providers || [],
+        sessionTopology,
+        configuredConnections,
+        stableNodePositions
+      );
+    }
+    return nextGraph;
+  }, [mode, providers, routing, activeSet, lastSet, clickableProviders, activeRequests, activeTotals, sessionTopology, configuredConnections, stableNodePositions]);
+
   const rfInstance = useRef(null);
-  const containerRef = useRef(null);
-  const fitOpts = { padding: 0.2, duration: 200 };
+  const didFitInitialGraph = useRef(false);
   const onInit = useCallback((instance) => {
     rfInstance.current = instance;
-    setTimeout(() => instance.fitView(fitOpts), 50);
+    setTimeout(() => instance.fitView(FIT_VIEW_OPTIONS), 50);
   }, []);
 
   const onNodeClick = useCallback(
@@ -862,21 +1640,11 @@ export default function ProviderTopology({
   );
 
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => {
-      if (rfInstance.current) rfInstance.current.fitView(fitOpts);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  useEffect(() => {
-    if (rfInstance.current) {
-      const id = setTimeout(() => rfInstance.current.fitView(fitOpts), 50);
-      return () => clearTimeout(id);
-    }
-  }, [graph.nodes.length, mode]);
+    if (didFitInitialGraph.current || graph.nodes.length === 0) return undefined;
+    didFitInitialGraph.current = true;
+    const id = setTimeout(() => rfInstance.current?.fitView(FIT_VIEW_OPTIONS), 50);
+    return () => clearTimeout(id);
+  }, [graph.nodes.length]);
 
   const emptyMessages = {
     providers: "No providers connected",
@@ -908,8 +1676,7 @@ export default function ProviderTopology({
       </div>
 
       <div
-        ref={containerRef}
-        className={`w-full min-w-0 rounded-lg border border-border bg-bg-subtle/30 ${mode === "providers" ? "h-[320px] sm:h-[480px]" : "h-[420px] sm:h-[560px]"}`}
+        className={`w-full min-w-0 rounded-lg border border-border bg-bg-subtle/30 ${mode === "providers" ? "h-[360px] sm:h-[560px]" : "h-[420px] sm:h-[560px]"}`}
       >
         {graph.nodes.length === 0 || (mode === "providers" && providers.length === 0) ? (
           <div className="flex h-full items-center justify-center text-sm text-text-muted">
@@ -917,13 +1684,11 @@ export default function ProviderTopology({
           </div>
         ) : (
           <ReactFlow
-            key={graphKey}
+            key={mode}
             nodes={graph.nodes}
             edges={graph.edges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
-            fitView
-            fitViewOptions={fitOpts}
             minZoom={0.1}
             maxZoom={2}
             onInit={onInit}
@@ -943,11 +1708,21 @@ export default function ProviderTopology({
         )}
       </div>
 
+      {mode === "providers" && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-[11px] text-text-muted">
+          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-cyan-400" /> live session on a connection</span>
+          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" /> historical connection</span>
+          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-warning" /> brief limit blink</span>
+          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-danger" /> real error blink</span>
+          <span>provider badge = sessions · child node = connection</span>
+        </div>
+      )}
+
       {mode !== "providers" && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-[11px] text-text-muted">
           <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" /> healthy account</span>
-          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-warning" /> cooling / has failures</span>
-          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-danger" /> unavailable</span>
+          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-warning" /> brief limit / cooldown blink</span>
+          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-danger" /> real routing error</span>
           <span>click a provider, account, combo or model to open its requests</span>
         </div>
       )}
@@ -964,6 +1739,7 @@ ProviderTopology.propTypes = {
   activeRequests: PropTypes.arrayOf(PropTypes.shape({
     provider: PropTypes.string,
     model: PropTypes.string,
+    connectionId: PropTypes.string,
     account: PropTypes.string,
     count: PropTypes.number,
   })),

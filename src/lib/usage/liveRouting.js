@@ -66,6 +66,8 @@ export function startLiveRequest({
   apiKey = null,
   label = null,
   combo = null,
+  connectionId = null,
+  connectionName = null,
 } = {}) {
   if (!id) return null;
   prune();
@@ -87,6 +89,8 @@ export function startLiveRequest({
     events: [],
     attempts: [],
     selectedAccount: null,
+    connectionId: connectionId || null,
+    connectionName: connectionName || null,
     error: null,
     contextProblem: false,
   };
@@ -141,8 +145,10 @@ export function pushRoutingEvent(id, event = {}) {
     if (event.provider) entry.provider = clip(event.provider);
     if (event.model) entry.model = clip(event.model);
   }
-  if (normalized.type === "account") {
-    entry.selectedAccount = clip(event.connectionName || event.connectionId) || null;
+  if (normalized.type === "account" || normalized.connectionId || normalized.connectionName) {
+    entry.selectedAccount = clip(event.connectionName || event.connectionId || entry.selectedAccount) || null;
+    if (event.connectionId) entry.connectionId = event.connectionId;
+    if (event.connectionName) entry.connectionName = clip(event.connectionName);
   }
   if (normalized.type === "streaming" || normalized.type === "complete") {
     entry.status = normalized.type === "complete" ? "completed" : "streaming";
@@ -155,7 +161,20 @@ export function pushRoutingEvent(id, event = {}) {
   return normalized;
 }
 
-export function finishLiveRequest(id, { status = "completed", provider = null, model = null, error = null, tokens = null, costUsd = null } = {}) {
+export function updateLiveRequestUsage(id, { provider = null, model = null, tokens = null, costUsd = null, connectionId = null, connectionName = null } = {}) {
+  const entry = requests.get(id);
+  if (!entry) return null;
+  if (provider) entry.provider = clip(provider);
+  if (model) entry.model = clip(model);
+  if (tokens) entry.tokens = tokens;
+  if (Number.isFinite(costUsd)) entry.costUsd = costUsd;
+  if (connectionId) entry.connectionId = connectionId;
+  if (connectionName) entry.connectionName = clip(connectionName);
+  liveRoutingEmitter.emit("request", { type: "usage", request: entry });
+  return entry;
+}
+
+export function finishLiveRequest(id, { status = "completed", provider = null, model = null, error = null, tokens = null, costUsd = null, connectionId = null, connectionName = null } = {}) {
   const entry = requests.get(id);
   if (!entry) return null;
   const at = Date.now();
@@ -165,6 +184,8 @@ export function finishLiveRequest(id, { status = "completed", provider = null, m
   entry.durationMs = at - entry.startedAtMs;
   if (provider) entry.provider = clip(provider);
   if (model) entry.model = clip(model);
+  if (connectionId) entry.connectionId = connectionId;
+  if (connectionName) entry.connectionName = clip(connectionName);
   if (error) entry.error = clip(error);
   if (tokens) entry.tokens = tokens;
   if (Number.isFinite(costUsd)) entry.costUsd = costUsd;

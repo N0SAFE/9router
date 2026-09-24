@@ -562,6 +562,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         provider,
         model,
         connectionId: credentials.connectionId,
+        connectionName: credentials.connectionName,
       });
       // Content keeps streaming after routing is done; the detail write finishes it.
       return result.response;

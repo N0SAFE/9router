@@ -535,6 +535,21 @@ button:disabled,
   animation: topology-edge-dash 0.18s linear infinite, topology-edge-flicker 0.22s steps(3) infinite;
 }
 
+@keyframes topology-failure-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.48; }
+}
+@keyframes topology-failure-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.2; transform: scale(0.55); }
+}
+.topology-failure-blink {
+  animation: topology-failure-blink 0.7s ease-in-out 5;
+}
+.topology-failure-pulse {
+  animation: topology-failure-pulse 0.65s ease-in-out 6;
+}
+
 /* React Flow controls: match app theme */
 .react-flow-controls-custom {
   background: var(--color-surface);

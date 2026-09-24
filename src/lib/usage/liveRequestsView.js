@@ -23,6 +23,10 @@ export async function buildLiveRequestsPayload() {
     .map((detail) => {
       const trace = detail.routing || {};
       const attempts = Array.isArray(trace.attempts) ? trace.attempts : [];
+      const latestAttempt = [...attempts].reverse().find((attempt) => attempt?.connectionId || attempt?.account);
+      const selected = trace.selected || {};
+      const connectionId = detail.connectionId || selected.connectionId || latestAttempt?.connectionId || null;
+      const connectionName = detail.connectionName || selected.name || latestAttempt?.account || null;
       const text = extractMessageText(detail?.request || {});
       const failed = !isSuccessStatus(detail.status);
       return {
@@ -32,6 +36,8 @@ export async function buildLiveRequestsPayload() {
         requestedModel: trace.requestedModel || detail.model || null,
         provider: detail.provider || trace.provider || null,
         model: detail.model || trace.model || null,
+        connectionId,
+        connectionName,
         label: (text || "").slice(0, 96) || null,
         combo: trace.combo?.name || null,
         status: failed ? "error" : "completed",
@@ -41,6 +47,8 @@ export async function buildLiveRequestsPayload() {
         ),
         startedAt: detail.timestamp,
         startedAtMs: detail.timestamp ? new Date(detail.timestamp).getTime() : 0,
+        completedAt: detail.timestamp,
+        completedAtMs: detail.timestamp ? new Date(detail.timestamp).getTime() : 0,
         durationMs: Number(detail.latency?.total) || null,
         tokens: detail.tokens || null,
         costUsd: Number(detail.cost) || 0,
