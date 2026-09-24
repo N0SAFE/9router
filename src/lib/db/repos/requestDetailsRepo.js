@@ -1,7 +1,7 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { EventEmitter } from "events";
-import { liveKeyForDetail } from "@/lib/usage/sessions.js";
+import { labelForDetail, liveKeyForDetail, mergeKeyForDetail } from "@/lib/usage/sessions.js";
 
 // Live session monitoring: listeners (SSE routes) get told when a detail lands.
 if (!global._detailsEmitter) {
@@ -14,6 +14,7 @@ const DEFAULT_MAX_RECORDS = 200;
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
 const DEFAULT_MAX_JSON_SIZE = 64 * 1024;
+const DEFAULT_PROVIDER_MAX_JSON_SIZE = 8 * 1024;
 const CONFIG_CACHE_TTL_MS = 5000;
 
 let cachedConfig = null;
@@ -33,6 +34,7 @@ async function getObservabilityConfig() {
         batchSize: settings.observabilityBatchSize || parseInt(process.env.OBSERVABILITY_BATCH_SIZE || String(DEFAULT_BATCH_SIZE), 10),
         flushIntervalMs: settings.observabilityFlushIntervalMs || parseInt(process.env.OBSERVABILITY_FLUSH_INTERVAL_MS || String(DEFAULT_FLUSH_INTERVAL_MS), 10),
         maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "64", 10)) * 1024,
+        providerMaxJsonSize: (settings.observabilityProviderMaxJsonSize || parseInt(process.env.OBSERVABILITY_PROVIDER_MAX_JSON_SIZE || "8", 10)) * 1024,
       };
       cachedConfigTs = Date.now();
       return cachedConfig;
@@ -49,6 +51,7 @@ async function getObservabilityConfig() {
       batchSize: settings.observabilityBatchSize || parseInt(process.env.OBSERVABILITY_BATCH_SIZE || String(DEFAULT_BATCH_SIZE), 10),
       flushIntervalMs: settings.observabilityFlushIntervalMs || parseInt(process.env.OBSERVABILITY_FLUSH_INTERVAL_MS || String(DEFAULT_FLUSH_INTERVAL_MS), 10),
       maxJsonSize: (settings.observabilityMaxJsonSize || parseInt(process.env.OBSERVABILITY_MAX_JSON_SIZE || "64", 10)) * 1024,
+      providerMaxJsonSize: (settings.observabilityProviderMaxJsonSize || parseInt(process.env.OBSERVABILITY_PROVIDER_MAX_JSON_SIZE || "8", 10)) * 1024,
     };
   } catch {
     cachedConfig = {
@@ -57,10 +60,52 @@ async function getObservabilityConfig() {
       batchSize: DEFAULT_BATCH_SIZE,
       flushIntervalMs: DEFAULT_FLUSH_INTERVAL_MS,
       maxJsonSize: DEFAULT_MAX_JSON_SIZE,
+      providerMaxJsonSize: DEFAULT_PROVIDER_MAX_JSON_SIZE,
     };
   }
   cachedConfigTs = Date.now();
   return cachedConfig;
+}
+
+// Older request-detail rows predate the derived session columns. Backfill them
+// once, lazily, so the first dashboard read pays the old full-ring parse and all
+// later implicit-session reads use the indexes. New rows always populate these
+// columns in flushToDatabase().
+let implicitKeyBackfillPromise = null;
+
+export async function ensureImplicitSessionKeys() {
+  if (!implicitKeyBackfillPromise) {
+    implicitKeyBackfillPromise = (async () => {
+      const db = await getAdapter();
+      const rows = db.all(
+        `SELECT id, data
+         FROM requestDetails
+         WHERE sessionId IS NULL AND (implicitKey IS NULL OR liveKey IS NULL)`
+      );
+      if (rows.length === 0) return 0;
+
+      db.transaction(() => {
+        for (const row of rows) {
+          const detail = parseJson(row.data, null);
+          if (!detail) continue;
+          const implicitKey = mergeKeyForDetail(detail);
+          const liveKey = liveKeyForDetail(detail);
+          db.run(
+            `UPDATE requestDetails
+             SET implicitKey = COALESCE(implicitKey, ?), liveKey = COALESCE(liveKey, ?)
+             WHERE id = ?`,
+            [implicitKey || null, liveKey || null, row.id]
+          );
+        }
+      });
+      return rows.length;
+    })().catch((error) => {
+      // Do not permanently suppress a retry after a transient DB/reset failure.
+      implicitKeyBackfillPromise = null;
+      throw error;
+    });
+  }
+  return implicitKeyBackfillPromise;
 }
 
 let writeBuffer = [];
@@ -198,22 +243,50 @@ async function flushToDatabase() {
             latency: item.latency || {},
             tokens: item.tokens || {},
             request: slimRequest(item.request, config.maxJsonSize),
-            providerRequest: truncateField(item.providerRequest, config.maxJsonSize),
-            providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
+            providerRequest: truncateField(item.providerRequest, config.providerMaxJsonSize || config.maxJsonSize),
+            providerResponse: truncateField(item.providerResponse, config.providerMaxJsonSize || config.maxJsonSize),
             response: truncateField(item.response, config.maxJsonSize),
             pxpipe: item.pxpipe || undefined,
             // Combo/pool/account decision trace (metadata, already capped).
             routing: item.routing ? truncateField(item.routing, config.maxJsonSize) : undefined,
           };
+          const label = labelForDetail(record);
+          const liveKey = liveKeyForDetail(record);
+          const implicitKey = sessionId ? null : mergeKeyForDetail(record);
 
           db.run(
-            `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, sessionId, data) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET timestamp = excluded.timestamp, provider = excluded.provider, model = excluded.model, connectionId = excluded.connectionId, status = excluded.status, sessionId = excluded.sessionId, data = excluded.data`,
-            [record.id, record.timestamp, record.provider, record.model, record.connectionId, record.status, record.sessionId, stringifyJson(record)]
+            `INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, sessionId, implicitKey, liveKey, label, data)
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               timestamp = excluded.timestamp,
+               provider = excluded.provider,
+               model = excluded.model,
+               connectionId = excluded.connectionId,
+               status = excluded.status,
+               sessionId = excluded.sessionId,
+               implicitKey = excluded.implicitKey,
+               liveKey = excluded.liveKey,
+               label = excluded.label,
+               data = excluded.data`,
+            [
+              record.id,
+              record.timestamp,
+              record.provider,
+              record.model,
+              record.connectionId,
+              record.status,
+              record.sessionId,
+              implicitKey,
+              liveKey,
+              label,
+              stringifyJson(record),
+            ]
           );
           saved.push({
             id: record.id,
             sessionId: record.sessionId,
-            liveKey: liveKeyForDetail(record),
+            implicitKey,
+            liveKey,
             provider: record.provider,
             model: record.model,
             timestamp: record.timestamp,
@@ -345,6 +418,39 @@ export async function getRecentDetailRows(limit = 500) {
   const db = await getAdapter();
   const capped = Math.max(1, Math.min(Number(limit) || 500, 2000));
   const rows = db.all(`SELECT data FROM requestDetails ORDER BY timestamp DESC LIMIT ?`, [capped]);
+  return rows.map((row) => parseJson(row.data, null)).filter(Boolean);
+}
+
+/**
+ * Details belonging to one implicit grouping key. The indexed path avoids
+ * loading unrelated request bodies when a session view is opened.
+ */
+export async function getDetailsByImplicitKey(implicitKey, limit = 1000) {
+  if (!implicitKey) return [];
+  await ensureImplicitSessionKeys();
+  const db = await getAdapter();
+  const capped = Math.max(1, Math.min(Number(limit) || 1000, 2000));
+  const rows = db.all(
+    `SELECT data FROM requestDetails
+     WHERE sessionId IS NULL AND implicitKey = ?
+     ORDER BY timestamp ASC LIMIT ?`,
+    [implicitKey, capped]
+  );
+  return rows.map((row) => parseJson(row.data, null)).filter(Boolean);
+}
+
+/** Details matching an in-flight/live first-user identity. */
+export async function getDetailsByLiveKey(liveKey, limit = 1000) {
+  if (!liveKey) return [];
+  await ensureImplicitSessionKeys();
+  const db = await getAdapter();
+  const capped = Math.max(1, Math.min(Number(limit) || 1000, 2000));
+  const rows = db.all(
+    `SELECT data FROM requestDetails
+     WHERE sessionId IS NULL AND liveKey = ?
+     ORDER BY timestamp ASC LIMIT ?`,
+    [liveKey, capped]
+  );
   return rows.map((row) => parseJson(row.data, null)).filter(Boolean);
 }
 

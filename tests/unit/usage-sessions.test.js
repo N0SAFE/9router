@@ -4,6 +4,8 @@ import {
   buildSessionTurns,
   detectSpikes,
   groupImplicitSessions,
+  implicitKeyFromSessionId,
+  labelForDetail,
   lastRealUserText,
   sessionIdOf,
   summarizeSession,
@@ -37,6 +39,17 @@ describe("session analytics", () => {
     expect(sessionIdOf({ sessionId: "s1" })).toBe("s1");
     expect(sessionIdOf({ request: { metadata: { sessionId: "s2" } } })).toBe("s2");
     expect(sessionIdOf({ request: { metadata: {} } })).toBeNull();
+  });
+
+  it("extracts implicit lookup keys without losing the timestamp suffix", () => {
+    expect(implicitKeyFromSessionId("implicit:nokey|opencode-go|abc:2026-09-22T10:00:00.000Z")).toBe("nokey|opencode-go|abc");
+    expect(implicitKeyFromSessionId("live:abc")).toBeNull();
+    expect(implicitKeyFromSessionId("implicit:bad")).toBeNull();
+  });
+
+  it("precomputes a safe label from the first user message", () => {
+    expect(labelForDetail({ request: { messages: [{ role: "user", content: "<environment_info>noise</environment_info> Build the dashboard" }] } })).toBe("Build the dashboard");
+    expect(labelForDetail({ request: { messages: [{ role: "system", content: "hidden" }] } })).toBeNull();
   });
 
   it("groups id-less details into implicit sessions and splits on idle gaps", () => {

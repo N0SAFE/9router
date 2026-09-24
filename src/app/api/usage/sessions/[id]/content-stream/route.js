@@ -1,5 +1,14 @@
-import { getDetailsBySession, getRecentDetailRows } from "@/lib/db/index.js";
-import { buildSessionTurns, groupImplicitSessions } from "@/lib/usage/sessions";
+import {
+  getDetailsByImplicitKey,
+  getDetailsByLiveKey,
+  getDetailsBySession,
+  getRecentDetailRows,
+} from "@/lib/db/index.js";
+import {
+  buildSessionTurns,
+  groupImplicitSessions,
+  implicitKeyFromSessionId,
+} from "@/lib/usage/sessions";
 import { getLiveTurns, liveContentEmitter } from "@/lib/usage/liveContent";
 import { listLiveRequests } from "@/lib/usage/liveRouting";
 import { detectContextProblem } from "@/lib/usage/routingEvents";
@@ -9,12 +18,21 @@ export const dynamic = "force-dynamic";
 async function resolveSession(sessionId) {
   if (!sessionId) return { sessionId: null, liveKey: null, details: [] };
   if (sessionId.startsWith("implicit:")) {
+    const implicitKey = implicitKeyFromSessionId(sessionId);
+    const indexed = implicitKey ? await getDetailsByImplicitKey(implicitKey, 1000) : [];
+    const indexedMatch = groupImplicitSessions(indexed).find((group) => group.id === sessionId);
+    if (indexedMatch) {
+      return { sessionId: null, liveKey: indexedMatch.liveKey || null, details: indexedMatch.details };
+    }
     const recent = await getRecentDetailRows(1000);
     const match = groupImplicitSessions(recent).find((group) => group.id === sessionId);
     return { sessionId: null, liveKey: match?.liveKey || null, details: match?.details || [] };
   }
   if (sessionId.startsWith("live:")) {
     const liveKey = sessionId.slice("live:".length);
+    const indexed = await getDetailsByLiveKey(liveKey, 1000);
+    const indexedMatch = groupImplicitSessions(indexed).find((group) => group.liveKey === liveKey);
+    if (indexedMatch) return { sessionId: null, liveKey, details: indexedMatch.details };
     const recent = await getRecentDetailRows(1000);
     const match = groupImplicitSessions(recent).find((group) => group.liveKey === liveKey);
     return { sessionId: null, liveKey, details: match?.details || [] };
@@ -33,10 +51,25 @@ function pastContentFrom(details) {
   }));
 }
 
-function liveContentFrom(session) {
+function createRoutingLookup() {
+  let map = new Map();
+  let builtAt = 0;
+  return () => {
+    const now = Date.now();
+    // Content deltas are coalesced, but several sessions can still be open at
+    // once. Reuse the routing map briefly instead of rebuilding it per frame.
+    if (now - builtAt >= 250) {
+      map = new Map(listLiveRequests().map((entry) => [entry.id, entry]));
+      builtAt = now;
+    }
+    return map;
+  };
+}
+
+function liveContentFrom(session, routingLookup) {
   // Attach the live routing trace so the chat can explain a slow or retried
   // request while it is still running (phase, attempts, fallbacks, errors).
-  const routingById = new Map(listLiveRequests().map((entry) => [entry.id, entry]));
+  const routingById = routingLookup();
   return getLiveTurns({ sessionId: session.sessionId, liveKey: session.liveKey }).map((entry) => {
     const live = routingById.get(entry.requestId) || null;
     const attempts = Array.isArray(live?.attempts) ? live.attempts : [];
@@ -101,14 +134,16 @@ export async function GET(request, { params }) {
       };
 
       const session = await resolveSession(sessionId);
+      const routingLookup = createRoutingLookup();
       send("snapshot", {
         sessionId: session.sessionId,
         liveKey: session.liveKey,
         past: pastContentFrom(session.details),
-        live: liveContentFrom(session),
+        live: liveContentFrom(session, routingLookup),
       });
 
       let queued = false;
+      let contentTimer = null;
       const onContent = (event) => {
         if (closed || queued) return;
         const entry = event?.entry;
@@ -119,10 +154,11 @@ export async function GET(request, { params }) {
         if (!matches) return;
         queued = true;
         // Coalesce token deltas into ~10 frames/second.
-        setTimeout(() => {
+        contentTimer = setTimeout(() => {
+          contentTimer = null;
           queued = false;
           if (closed) return;
-          send("delta", { live: liveContentFrom(session) });
+          send("delta", { live: liveContentFrom(session, routingLookup) });
         }, 100);
       };
       liveContentEmitter.on("content", onContent);
@@ -143,6 +179,7 @@ export async function GET(request, { params }) {
       const cleanup = () => {
         closed = true;
         liveContentEmitter.off("content", onContent);
+        if (contentTimer) clearTimeout(contentTimer);
         if (heartbeat) clearInterval(heartbeat);
         try {
           controller.close();

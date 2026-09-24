@@ -2,11 +2,16 @@
  * Build the payload the Sessions tab (and its SSE stream) renders for one
  * session: turns with metrics/flags, chat deltas, spikes, budget progress and
  * the monitored flag. Explicit sessions come from requestDetails.sessionId;
- * implicit ones are re-derived from the recent details ring.
+ * implicit ones use the derived implicit-key index, with a legacy ring fallback.
  */
 
 import { getAdapter } from "@/lib/db/driver.js";
-import { getDetailsBySession, getRecentDetailRows } from "@/lib/db/index.js";
+import {
+  getDetailsByImplicitKey,
+  getDetailsByLiveKey,
+  getDetailsBySession,
+  getRecentDetailRows,
+} from "@/lib/db/index.js";
 import { getSettings } from "@/lib/localDb";
 import { getProviderConnections } from "@/lib/localDb";
 import {
@@ -14,8 +19,9 @@ import {
   buildSessionTurns,
   detectSpikes,
   groupImplicitSessions,
+  implicitKeyFromSessionId,
+  labelForDetail,
   liveKeyForDetail,
-  sanitizeLabel,
   summarizeSession,
 } from "./sessions.js";
 import { summarizeRouting } from "./routingEvents.js";
@@ -27,16 +33,27 @@ const LIVE_WINDOW_MS = 90 * 1000;
 async function loadSessionDetails(sessionId) {
   if (!sessionId) return { details: [], kind: "unknown", liveKey: null };
   if (sessionId.startsWith("implicit:")) {
+    const implicitKey = implicitKeyFromSessionId(sessionId);
+    const indexed = implicitKey ? await getDetailsByImplicitKey(implicitKey, 1000) : [];
+    const indexedMatch = groupImplicitSessions(indexed).find((group) => group.id === sessionId);
+    if (indexedMatch) {
+      return { details: indexedMatch.details, kind: "implicit", liveKey: indexedMatch.liveKey || null };
+    }
+
+    // Backward-compatible fallback for malformed ids and rows that could not
+    // be indexed. This is deliberately not the normal path.
     const recent = await getRecentDetailRows(1000);
-    const groups = groupImplicitSessions(recent);
-    const match = groups.find((group) => group.id === sessionId);
+    const match = groupImplicitSessions(recent).find((group) => group.id === sessionId);
     return { details: match?.details || [], kind: "implicit", liveKey: match?.liveKey || null };
   }
   if (sessionId.startsWith("live:")) {
     const liveKey = sessionId.slice("live:".length);
+    const indexed = await getDetailsByLiveKey(liveKey, 1000);
+    const match = groupImplicitSessions(indexed).find((group) => group.liveKey === liveKey);
+    if (match) return { details: match.details, kind: "implicit", liveKey };
     const recent = await getRecentDetailRows(1000);
-    const match = groupImplicitSessions(recent).find((group) => group.liveKey === liveKey);
-    return { details: match?.details || [], kind: "implicit", liveKey };
+    const fallback = groupImplicitSessions(recent).find((group) => group.liveKey === liveKey);
+    return { details: fallback?.details || [], kind: "implicit", liveKey };
   }
   const details = await getDetailsBySession(sessionId, 1000);
   return {
@@ -183,34 +200,41 @@ export async function listExplicitSessions(limit = 200) {
     [capped]
   );
 
-  // Labels: first user message of each session (one row per session).
+  // Labels are stored at write time so the common path does not parse the full
+  // request body of every session. Rows written before the label column are
+  // filled with the old first-row fallback below.
   const labels = {};
   try {
     const labelRows = db.all(
-      `SELECT d.sessionId AS sessionId, d.data AS data
-       FROM requestDetails d
-       JOIN (
-         SELECT sessionId AS sid, MIN(timestamp) AS t
-         FROM requestDetails
-         WHERE sessionId IS NOT NULL
-         GROUP BY sessionId
-       ) m ON d.sessionId = m.sid AND d.timestamp = m.t`
+      `SELECT sessionId, label
+       FROM requestDetails
+       WHERE sessionId IS NOT NULL AND label IS NOT NULL AND label != ''
+       ORDER BY timestamp ASC`
     );
     for (const row of labelRows) {
-      try {
-        const detail = JSON.parse(row.data);
-        const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
-        const user = messages.find((message) => message?.role === "user");
-        const text = typeof user?.content === "string"
-          ? user.content
-          : Array.isArray(user?.content)
-            ? user.content.map((part) => part?.text || "").join(" ")
-            : "";
-        // Noise-only messages must not become labels: skip and let the model fallback win.
-        const label = text ? sanitizeLabel(text) : null;
-        if (label) labels[row.sessionId] = label;
-      } catch {
-        // ignore malformed rows
+      if (!labels[row.sessionId]) labels[row.sessionId] = row.label;
+    }
+
+    const missing = new Set(rows.map((row) => row.sessionId).filter((sessionId) => !labels[sessionId]));
+    if (missing.size > 0) {
+      const fallbackRows = db.all(
+        `SELECT d.sessionId AS sessionId, d.data AS data
+         FROM requestDetails d
+         JOIN (
+           SELECT sessionId AS sid, MIN(timestamp) AS t
+           FROM requestDetails
+           WHERE sessionId IS NOT NULL
+           GROUP BY sessionId
+         ) m ON d.sessionId = m.sid AND d.timestamp = m.t`
+      );
+      for (const row of fallbackRows) {
+        if (!missing.has(row.sessionId)) continue;
+        try {
+          const label = labelForDetail(JSON.parse(row.data));
+          if (label) labels[row.sessionId] = label;
+        } catch {
+          // labels are best-effort
+        }
       }
     }
   } catch {

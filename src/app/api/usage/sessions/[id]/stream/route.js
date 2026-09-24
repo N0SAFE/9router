@@ -1,5 +1,6 @@
 import { detailsEmitter } from "@/lib/db/index.js";
 import { buildSessionPayload } from "@/lib/usage/sessionPayload";
+import { implicitKeyFromSessionId } from "@/lib/usage/sessions";
 import { liveSessionsEmitter } from "@/lib/usage/liveSessions";
 
 export const dynamic = "force-dynamic";
@@ -44,34 +45,84 @@ export async function GET(request, { params }) {
         }
       };
 
-      send("snapshot", await snapshot());
+      const initialPayload = await snapshot();
+      const sessionImplicitKey = sessionId.startsWith("implicit:") ? implicitKeyFromSessionId(sessionId) : null;
+      let sessionLiveKey = initialPayload?.liveKey || (sessionId.startsWith("live:") ? sessionId.slice("live:".length) : null);
+      send("snapshot", initialPayload);
 
-      const onDetail = async (entry) => {
-        if (closed) return;
-        // Explicit sessions can be matched by their id; implicit groups are
-        // re-derived (the new detail may extend the group).
-        if (entry?.sessionId !== sessionId && !sessionId.startsWith("implicit:")) {
+      let updateTimer = null;
+      let updateInFlight = false;
+      let updateQueued = false;
+      const scheduleUpdate = () => {
+        if (closed || updateInFlight) {
+          updateQueued = true;
           return;
         }
-        const payload = await snapshot();
-        if (!payload?.missing) {
-          send("update", payload);
+        if (updateTimer) return;
+        // Several request details can land in one tick. Rebuild once after the
+        // burst instead of parsing the session once per detail.
+        updateTimer = setTimeout(() => {
+          updateTimer = null;
+          runUpdate();
+        }, 250);
+      };
+
+      const runUpdate = async () => {
+        if (closed || updateInFlight) {
+          updateQueued = true;
+          return;
         }
+        updateInFlight = true;
+        try {
+          const payload = await snapshot();
+          if (sessionLiveKey) sessionLiveKey = payload?.liveKey || sessionLiveKey;
+          if (!payload?.missing) send("update", payload);
+        } finally {
+          updateInFlight = false;
+          if (updateQueued && !closed) {
+            updateQueued = false;
+            scheduleUpdate();
+          }
+        }
+      };
+
+      const detailMatches = (entry) => {
+        if (!entry) return false;
+        if (sessionId.startsWith("implicit:")) {
+          if (entry.sessionId) return false;
+          if (sessionImplicitKey && entry.implicitKey && entry.implicitKey !== sessionImplicitKey) return false;
+          if (sessionLiveKey && entry.liveKey !== sessionLiveKey) return false;
+          return true;
+        }
+        if (sessionId.startsWith("live:")) {
+          return !entry.sessionId && entry.liveKey === (sessionLiveKey || sessionId.slice("live:".length));
+        }
+        return entry.sessionId === sessionId;
+      };
+
+      const onDetail = (entry) => {
+        if (closed || !detailMatches(entry)) return;
+        scheduleUpdate();
       };
 
       detailsEmitter.on("detail", onDetail);
 
       // A session that is still generating has no detail yet: push an update as
       // soon as its request starts so the client can attach immediately.
-      const onSessionEvent = async (event) => {
+      const onSessionEvent = (event) => {
         if (closed) return;
         const entry = event?.session;
         if (!entry) return;
-        if (entry.sessionId && entry.sessionId !== sessionId) return;
-        const payload = await snapshot();
-        if (payload?.missing) return;
-        if (entry.liveKey && payload.liveKey && entry.liveKey !== payload.liveKey) return;
-        send("update", payload);
+        if (sessionId.startsWith("implicit:")) {
+          if (entry.sessionId) return;
+          if (sessionLiveKey && entry.liveKey && entry.liveKey !== sessionLiveKey) return;
+          if (!sessionLiveKey && entry.liveKey) sessionLiveKey = entry.liveKey;
+        } else if (sessionId.startsWith("live:")) {
+          if (entry.sessionId || entry.liveKey !== sessionLiveKey) return;
+        } else if (entry.sessionId !== sessionId) {
+          return;
+        }
+        scheduleUpdate();
       };
       liveSessionsEmitter.on("session", onSessionEvent);
 
@@ -92,6 +143,7 @@ export async function GET(request, { params }) {
         closed = true;
         detailsEmitter.off("detail", onDetail);
         liveSessionsEmitter.off("session", onSessionEvent);
+        if (updateTimer) clearTimeout(updateTimer);
         if (heartbeat) clearInterval(heartbeat);
         try {
           controller.close();

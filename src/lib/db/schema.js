@@ -154,6 +154,11 @@ export const TABLES = {
       connectionId: "TEXT",
       status: "TEXT",
       sessionId: "TEXT",
+      // Derived indexes keep implicit-session payloads off the full detail ring.
+      // They are nullable so existing rows remain valid until the lazy backfill.
+      implicitKey: "TEXT",
+      liveKey: "TEXT",
+      label: "TEXT",
       data: "TEXT NOT NULL",
     },
     indexes: [
@@ -162,6 +167,8 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_rd_model ON requestDetails(model)",
       "CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId)",
       "CREATE INDEX IF NOT EXISTS idx_rd_session_ts ON requestDetails(sessionId, timestamp)",
+      "CREATE INDEX IF NOT EXISTS idx_rd_implicit_ts ON requestDetails(implicitKey, timestamp)",
+      "CREATE INDEX IF NOT EXISTS idx_rd_live_ts ON requestDetails(liveKey, timestamp)",
     ],
   },
 };

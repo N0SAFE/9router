@@ -44,6 +44,10 @@ const DEFAULT_SETTINGS = {
   observabilityBatchSize: 20,
   observabilityFlushIntervalMs: 5000,
   observabilityMaxJsonSize: 64,
+  // Provider-side bodies are diagnostic-only; keep them much smaller than the
+  // user-visible request/response payloads so observability cannot dominate
+  // SQLite writes and dashboard rebuilds.
+  observabilityProviderMaxJsonSize: 8,
   // "digest" (default) exposes bounded previews (roles, sizes, short snippets)
   // in the Usage detail drawer; "none" keeps payloads fully redacted.
   observabilityContentMode: "digest",

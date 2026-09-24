@@ -70,7 +70,8 @@ export {
   saveRequestDetail, getRequestDetails, getRequestDetailById, getDistinctProviders,
   getLastRequestDetail, getRequestDetailByClientRequestId,
   getRequestDetailsInRange,
-  getDetailsBySession, getRecentDetailRows, detailsEmitter,
+  getDetailsBySession, getRecentDetailRows, getDetailsByImplicitKey, getDetailsByLiveKey,
+  ensureImplicitSessionKeys, detailsEmitter,
 } from "./repos/requestDetailsRepo.js";
 
 // Export/import full DB

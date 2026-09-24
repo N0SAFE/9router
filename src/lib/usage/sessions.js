@@ -288,6 +288,23 @@ export function implicitSessionMatches(sessionId, group) {
   return group.id === sessionId;
 }
 
+/**
+ * Extract the persisted implicit grouping key from an implicit session id.
+ * Ids are `implicit:<mergeKey>:<startedAt>`; the timestamp contains colons, so
+ * split at the final colon rather than assuming a fixed number of segments.
+ */
+export function implicitKeyFromSessionId(sessionId) {
+  const prefix = "implicit:";
+  if (typeof sessionId !== "string" || !sessionId.startsWith(prefix)) return null;
+  const value = sessionId.slice(prefix.length);
+  // The timestamp itself contains colons, so identify its ISO prefix rather
+  // than splitting at the final colon in the session id.
+  const timestampSeparator = value.search(/:\d{4}-\d{2}-\d{2}T/);
+  const separator = timestampSeparator >= 0 ? timestampSeparator : value.lastIndexOf(":");
+  if (separator <= 0) return null;
+  return value.slice(0, separator) || null;
+}
+
 /* ---------------------------------- turns --------------------------------- */
 
 /**
@@ -494,6 +511,13 @@ export function sanitizeLabel(text, fallback = null) {
   const candidate = stripped.length >= 8 ? stripped : value;
   if (LABEL_NOISE.some((pattern) => pattern.test(candidate))) return fallback;
   return candidate.slice(0, 96);
+}
+
+/** First meaningful user label for one persisted detail. */
+export function labelForDetail(detail) {
+  const messages = Array.isArray(detail?.request?.messages) ? detail.request.messages : [];
+  const firstUser = messages.find((message) => message?.role === "user");
+  return sanitizeLabel(messageText(firstUser));
 }
 
 /** First meaningful user message across the session, with a model fallback. */
