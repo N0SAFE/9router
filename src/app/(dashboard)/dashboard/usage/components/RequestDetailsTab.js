@@ -23,6 +23,7 @@ import UsageInsights from "./UsageInsights";
 import UsageFilterBar from "./UsageFilterBar";
 import { useUsageFilters } from "./useUsageFilters";
 import { fmt, fmtCompact, fmtCost, fmtPct, fmtTime, fmtDateTime, fmtDuration } from "./format";
+import { errorText } from "@/lib/usage/errorText";
 
 const PERIODS = [
   { value: "1h", label: "1h" },
@@ -142,7 +143,7 @@ function RoutingTimeline({ detail }) {
                   ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
                   : "bg-surface-2 text-text-muted"
               )}
-              title={model.error || undefined}
+              title={errorText(model.error) || undefined}
             >
               <span className="material-symbols-outlined text-[12px]">{model.status === "success" ? "check" : "close"}</span>
               {model.model}
@@ -176,8 +177,8 @@ function RoutingTimeline({ detail }) {
                   → {attempt.redirectTo.slice(0, 8)}
                 </span>
               )}
-              {attempt.error && (
-                <span className="w-full truncate text-[11px] text-text-subtle" title={attempt.error}>{attempt.error}</span>
+              {errorText(attempt.error) && (
+                <span className="w-full truncate text-[11px] text-text-subtle" title={errorText(attempt.error)}>{errorText(attempt.error)}</span>
               )}
             </li>
           ))}

@@ -14,6 +14,7 @@ import "@xyflow/react/dist/style.css";
 import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
 import { fmtCompact, fmtTime } from "./format";
+import { errorText as failureText } from "@/lib/usage/errorText";
 
 // Kame + electric particles along active edges. Counts/speed scale with the
 // number of active connections (or in-flight requests) the edge carries.
@@ -121,11 +122,14 @@ function buildSessionTopology(liveRequests, activeRequests, metricsSince = 0) {
     if (!provider || !failure.kind) return;
     const at = eventTime(failure.at);
     if (!at || now - at > FAILURE_BLINK_MS || at - now > 5_000) return;
+    // Rendered as a tooltip on the blinking node: a raw object would show
+    // `[object Object]` instead of the upstream reason.
+    const message = failureText(failure.message);
     const row = getLiveRow(provider, connectionId, connectionName);
     if (row && (!row.failureAt || at >= row.failureAt)) {
       row.failureAt = at;
       row.failureKind = failure.kind;
-      row.failureMessage = failure.message || null;
+      row.failureMessage = message || null;
     }
     const currentProviderFailure = failuresByProvider.get(provider);
     if (!currentProviderFailure || at >= currentProviderFailure.at) {
@@ -202,7 +206,7 @@ function buildSessionTopology(liveRequests, activeRequests, metricsSince = 0) {
       updateFailure(attemptProvider, attempt.connectionId, attempt.account || attempt.connectionName, {
         kind,
         at: attempt.at,
-        message: attempt.error || attempt.action || `HTTP ${attempt.status ?? "?"}`,
+        message: failureText(attempt.error) || attempt.action || `HTTP ${attempt.status ?? "?"}`,
       });
     }
     for (const event of Array.isArray(entry.events) ? entry.events : []) {
@@ -211,14 +215,14 @@ function buildSessionTopology(liveRequests, activeRequests, metricsSince = 0) {
       updateFailure(eventProvider, event.connectionId, event.connectionName || event.account, {
         kind: classifyFailure(event.status, event.error, event.action),
         at: event.at || event.atIso,
-        message: event.error || event.message,
+        message: failureText(event.error || event.message),
       });
     }
     if (entry.status === "error" && entry.error) {
       updateFailure(provider, connectionId, connectionName, {
         kind: classifyFailure(entry.status, entry.error),
         at: entry.finishedAtMs || entry.finishedAt,
-        message: entry.error,
+        message: failureText(entry.error),
       });
     }
   }
@@ -297,7 +301,7 @@ function isSuccessStatusValue(status) {
 
 function classifyFailure(status, error, action) {
   if (isSuccessStatusValue(status) && !error) return null;
-  const text = `${status || ""} ${error || ""} ${action || ""}`.toLowerCase();
+  const text = `${status || ""} ${failureText(error)} ${action || ""}`.toLowerCase();
   const numericStatus = Number(status);
   const warning = numericStatus === 429
     || numericStatus === 402
@@ -970,7 +974,7 @@ function buildProvidersLayout(
         totalTokens,
         failureAt: failure?.at || 0,
         failureKind: failure?.kind || null,
-        failureMessage: failure?.message || null,
+        failureMessage: failureText(failure?.message) || null,
         role: connections.length > 0 ? "source" : undefined,
         clickable,
       },

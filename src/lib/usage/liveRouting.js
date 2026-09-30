@@ -36,8 +36,56 @@ const CONTEXT_PATTERNS = [
   /exceeds? .*tokens?/i,
 ];
 
+/**
+ * Flatten any error-ish value to a bounded plain-text string.
+ *
+ * Providers report failures as objects (`{message}`, `{error:{message}}`), and
+ * `String(obj)` yields `[object Object]` — which is what the Sessions tab and
+ * the routing canvas used to display. Unwrap the common envelopes first and
+ * only fall back to JSON so the text stays readable.
+ */
 function clip(value) {
-  const text = value == null ? "" : String(value);
+  return truncate(flattenText(value, 0));
+}
+
+// Envelope keys, most descriptive first.
+const ENVELOPE_KEYS = ["message", "error", "detail", "reason", "description", "msg"];
+// Bounds the walk: upstream payloads can nest arbitrarily and a cycle would
+// otherwise recurse until the stack blows.
+const MAX_FLATTEN_DEPTH = 5;
+
+function flattenText(value, depth) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (value instanceof Error) return value.message || "";
+  if (depth >= MAX_FLATTEN_DEPTH) return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = flattenText(item, depth + 1);
+      if (text) return text;
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    for (const key of ENVELOPE_KEYS) {
+      const nested = value[key];
+      if (nested == null || nested === value) continue; // self-reference guard
+      const text = flattenText(nested, depth + 1);
+      if (text) return text;
+    }
+    try {
+      const json = JSON.stringify(value);
+      if (json && json !== "{}") return json;
+    } catch { /* circular — nothing readable left */ }
+    return "";
+  }
+  return String(value);
+}
+
+function truncate(text) {
   return text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}…` : text;
 }
 
@@ -104,13 +152,14 @@ export function pushRoutingEvent(id, event = {}) {
   if (!entry) return null;
   const at = Date.now();
   const normalized = {
+    ...event,
     at,
     atIso: new Date(at).toISOString(),
+    // Clipped after the spread so a raw object `error`/`message` from the
+    // caller cannot leak an unserialisable `[object Object]` into the SSE feed.
     type: clip(event.type) || "note",
-    message: event.message ? clip(event.message) : null,
-    ...event,
-    type: clip(event.type) || "note",
-    message: event.message ? clip(event.message) : null,
+    message: clip(event.message) || null,
+    error: clip(event.error) || null,
   };
   if (entry.events.length < MAX_EVENTS) entry.events.push(normalized);
 
@@ -133,8 +182,10 @@ export function pushRoutingEvent(id, event = {}) {
   }
   if (normalized.type === "error") {
     entry.status = "error";
-    entry.error = clip(event.error || event.message || `HTTP ${event.status ?? "?"}`);
-    if (detectContextProblem(`${event.error || ""} ${event.status || ""} ${event.message || ""}`)) {
+    entry.error = normalized.error || normalized.message || `HTTP ${event.status ?? "?"}`;
+    // Match on the flattened text: a raw object would stringify to
+    // `[object Object]` and hide every context-window phrase inside it.
+    if (detectContextProblem(`${entry.error} ${event.status || ""} ${normalized.message || ""}`)) {
       entry.contextProblem = true;
     }
   }

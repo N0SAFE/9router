@@ -14,7 +14,7 @@ import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse, unavailableResponse, toPlainErrorMessage } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
 import { formatRetryAfter } from "open-sse/services/accountFallback.js";
 import {
@@ -436,9 +436,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         // model might work later. Quota/rate-limit exhaustion still returns 503.
         if (lastPoolAction === POOL_ACTIONS.CAPABILITY && lastStatus && lastError) {
           log.warn("POOL", `[${provider}/${model}] no account supports this model (${lastStatus}) → returning upstream error`);
-          return errorResponse(lastStatus, `[${provider}/${model}] ${lastError}`);
+          return errorResponse(lastStatus, `[${provider}/${model}] ${toPlainErrorMessage(lastError, "request failed")}`);
         }
-        const errorMsg = lastError || credentials.lastError || "Unavailable";
+        const errorMsg = toPlainErrorMessage(lastError || credentials.lastError, "Unavailable");
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman, lastHeaders);
@@ -451,13 +451,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       // the earliest cooldown so the client knows when the pool frees up again.
       const retryAt = getSessionRetryAt(poolSessionKey, model);
       if (retryAt && new Date(retryAt).getTime() > Date.now()) {
-        const errorMsg = lastError || `[${provider}/${model}] All accounts unavailable`;
+        const errorMsg = toPlainErrorMessage(lastError, `[${provider}/${model}] All accounts unavailable`);
         const human = formatRetryAfter(retryAt);
         log.warn("CHAT", `[${provider}/${model}] session pool cooling down (${human})`);
         return unavailableResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, errorMsg, retryAt, human);
       }
       log.warn("CHAT", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
+      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, toPlainErrorMessage(lastError, "All accounts unavailable"), lastHeaders);
     }
 
     // Policy: connection allowlist — skip disallowed accounts like cooldowns.
@@ -545,6 +545,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       });
     } finally {
       endKeyRequest(apiKey);
+    }
+
+    if (!result.success) {
+      // Providers report failures in many shapes (`{message}`, `{error:{message}}`,
+      // bare objects). Everything downstream — routing events, the live-request
+      // feed, account pool records, log lines — is string-based, so flatten once
+      // here or the UI renders `[object Object]`.
+      result.error = toPlainErrorMessage(result.error, `HTTP ${result.status ?? "error"}`);
     }
 
     if (result.success) {
