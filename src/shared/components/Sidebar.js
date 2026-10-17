@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import PropTypes from "prop-types";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -11,6 +11,7 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import useSettingsStore from "@/store/settingsStore";
 import Button from "./Button";
 import { ConfirmModal } from "./Modal";
+import UpgradeAgentModal from "./UpgradeAgentModal";
 
 // const VISIBLE_MEDIA_KINDS = ["embedding", "image", "imageToText", "tts", "stt", "webSearch", "webFetch", "video", "music"];
 const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt", "systemone"];
@@ -46,6 +47,8 @@ export default function Sidebar({ onClose }) {
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [agent, setAgent] = useState(null);
   const [isUpdating, setIsUpdating] = useState(false);
   const [shutdownCountdown, setShutdownCountdown] = useState(0);
   const [enableTranslator, setEnableTranslator] = useState(false);
@@ -69,6 +72,25 @@ export default function Sidebar({ onClose }) {
     }, 2500);
     return () => clearTimeout(timer);
   }, []);
+
+  // Upgrade agent state: drives the "Upgrade by agent" / "Resume upgrade session" entry.
+  const loadAgent = useCallback(() => {
+    fetch("/api/upgrade/status", { cache: "no-store" })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (data) setAgent(data); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { loadAgent(); }, [loadAgent]);
+
+  // Poll while a run is in progress so the sidebar label stays honest.
+  useEffect(() => {
+    if (!agent?.running) return undefined;
+    const timer = setInterval(loadAgent, 4000);
+    return () => clearInterval(timer);
+  }, [agent?.running, loadAgent]);
+
+  const hasAgentSession = Boolean(agent?.startedAt) && agent?.status !== "idle";
 
   const isActive = (href) => {
     if (href === "/dashboard/endpoint") {
@@ -132,27 +154,40 @@ export default function Sidebar({ onClose }) {
               <span className="text-xs text-text-muted">v{APP_CONFIG.version}</span>
             </div>
           </Link>
-          {updateInfo && (
+          {(updateInfo || hasAgentSession) && (
             <div className="flex flex-col gap-1.5 rounded p-1 -m-1">
-              <span className="text-xs font-semibold text-green-600 dark:text-amber-500">
-                ↑ New version available: v{updateInfo.latestVersion}
-              </span>
+              {updateInfo && (
+                <span className="text-xs font-semibold text-green-600 dark:text-amber-500">
+                  ↑ New version available: v{updateInfo.latestVersion}
+                </span>
+              )}
               <div className="flex items-center gap-2">
+                {updateInfo && (
+                  <button
+                    onClick={() => setShowUpdateModal(true)}
+                    className="px-2 py-1 rounded bg-green-600 hover:bg-green-700 dark:bg-amber-500 dark:hover:bg-amber-600 text-white text-[11px] font-semibold transition-colors cursor-pointer"
+                  >
+                    Update now
+                  </button>
+                )}
                 <button
-                  onClick={() => setShowUpdateModal(true)}
-                  className="px-2 py-1 rounded bg-green-600 hover:bg-green-700 dark:bg-amber-500 dark:hover:bg-amber-600 text-white text-[11px] font-semibold transition-colors cursor-pointer"
+                  onClick={() => setShowUpgradeModal(true)}
+                  title="Rebase this fork onto upstream with the opencode agent"
+                  className="px-2 py-1 rounded bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-semibold transition-colors cursor-pointer"
                 >
-                  Update now
+                  {hasAgentSession ? "Resume upgrade session" : "Upgrade by agent"}
                 </button>
-                <button
-                  onClick={() => copy(INSTALL_CMD)}
-                  title="Copy install command"
-                  className="flex-1 text-left hover:opacity-80 transition-opacity cursor-pointer min-w-0"
-                >
-                  <code className="block text-[10px] text-green-600/80 dark:text-amber-400/70 font-mono truncate">
-                    {copied ? "✓ copied!" : INSTALL_CMD}
-                  </code>
-                </button>
+                {updateInfo && (
+                  <button
+                    onClick={() => copy(INSTALL_CMD)}
+                    title="Copy install command"
+                    className="flex-1 text-left hover:opacity-80 transition-opacity cursor-pointer min-w-0"
+                  >
+                    <code className="block text-[10px] text-green-600/80 dark:text-amber-400/70 font-mono truncate">
+                      {copied ? "✓ copied!" : INSTALL_CMD}
+                    </code>
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -356,6 +391,13 @@ export default function Sidebar({ onClose }) {
 
       </aside>
 
+
+      {/* Upgrade agent Modal */}
+      <UpgradeAgentModal
+        isOpen={showUpgradeModal}
+        onClose={() => setShowUpgradeModal(false)}
+        onStarted={loadAgent}
+      />
 
       {/* Update Confirmation Modal */}
       <ConfirmModal

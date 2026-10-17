@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Card, Input } from "@/shared/components";
+import { Button, Card, ModelSelectModal } from "@/shared/components";
 
 // Local upgrade agent: starts `opencode run` against the mounted fork checkout
 // so the fork can be rebased onto upstream without leaving the dashboard.
@@ -18,7 +18,9 @@ export default function UpgradeAgentCard() {
   const [version, setVersion] = useState(null);
   const [state, setState] = useState(null);
   const [model, setModel] = useState("");
-  const [suggestions, setSuggestions] = useState([]);
+  const [activeProviders, setActiveProviders] = useState([]);
+  const [modelAliases, setModelAliases] = useState({});
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [message, setMessage] = useState(null);
   const [showLog, setShowLog] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -30,10 +32,28 @@ export default function UpgradeAgentCard() {
       if (!res.ok) return;
       const data = await res.json();
       setState(data);
-      setSuggestions(data.suggestions || []);
       setModel((current) => current || data.model || "");
     } catch {
       /* dashboard stays usable when the agent state is unreadable */
+    }
+  }, []);
+
+  const loadPickerSources = useCallback(async () => {
+    try {
+      const [provRes, aliasRes] = await Promise.all([
+        fetch("/api/providers", { cache: "no-store" }),
+        fetch("/api/models/alias", { cache: "no-store" }),
+      ]);
+      if (provRes.ok) {
+        const data = await provRes.json();
+        setActiveProviders((data.connections || []).filter((c) => c.isActive !== false));
+      }
+      if (aliasRes.ok) {
+        const data = await aliasRes.json();
+        setModelAliases(data.aliases || {});
+      }
+    } catch {
+      /* picker falls back to the static registry */
     }
   }, []);
 
@@ -49,7 +69,8 @@ export default function UpgradeAgentCard() {
   useEffect(() => {
     loadVersion();
     loadStatus();
-  }, [loadStatus, loadVersion]);
+    loadPickerSources();
+  }, [loadStatus, loadVersion, loadPickerSources]);
 
   useEffect(() => {
     const interval = state?.running ? 3000 : 15000;
@@ -57,7 +78,10 @@ export default function UpgradeAgentCard() {
     return () => clearInterval(pollRef.current);
   }, [state?.running, loadStatus]);
 
-  const saveModel = async (value) => {
+  const pickModel = async (selected) => {
+    const value = selected?.value || selected?.name || "";
+    if (!value) return;
+    setModel(value);
     setBusy(true);
     setMessage(null);
     try {
@@ -67,7 +91,7 @@ export default function UpgradeAgentCard() {
         body: JSON.stringify({ upgradeModel: value }),
       });
       if (!res.ok) throw new Error("Failed to save the upgrade model");
-      setMessage({ type: "success", text: "Upgrade model saved" });
+      setMessage({ type: "success", text: `Upgrade model set to ${value}` });
       await loadStatus();
     } catch (error) {
       setMessage({ type: "error", text: error.message });
@@ -161,28 +185,26 @@ export default function UpgradeAgentCard() {
         </div>
 
         <div className="flex flex-col sm:flex-row gap-2">
-          <Input
-            label="Model for the upgrade agent"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="e.g. opencode-go/deepseek-v4.1-flash or a combo id"
-            list="upgrade-model-suggestions"
-            className="flex-1"
-          />
-          <datalist id="upgrade-model-suggestions">
-            {suggestions.map((id) => (
-              <option key={id} value={id} />
-            ))}
-          </datalist>
-          <div className="flex gap-2 sm:self-end">
-            <Button variant="outline" icon="save" onClick={() => saveModel(model)} disabled={busy || !model.trim()}>
-              Save
-            </Button>
+          <button
+            type="button"
+            onClick={() => setPickerOpen(true)}
+            className="flex-1 flex items-center gap-2 px-3 py-2 rounded-[10px] border border-border bg-surface hover:border-brand-500/40 transition-colors text-left cursor-pointer"
+          >
+            <span className="material-symbols-outlined text-[18px] text-text-muted">psychology</span>
+            <span className={`flex-1 min-w-0 truncate text-sm ${model ? "text-text-main" : "text-text-muted"}`}>
+              {model || "Select the model for the upgrade agent…"}
+            </span>
+            <span className="material-symbols-outlined text-[18px] text-text-muted">expand_more</span>
+          </button>
+          <div className="flex gap-2 sm:self-auto">
             <Button icon="rocket_launch" onClick={start} disabled={busy || !canRun}>
               Run upgrade
             </Button>
           </div>
         </div>
+        <p className="text-xs text-text-muted">
+          Models and combos come straight from this router&apos;s catalog; the choice is saved automatically.
+        </p>
 
         {!hasUpdate && version && (
           <p className="text-xs text-text-muted">
@@ -231,6 +253,16 @@ export default function UpgradeAgentCard() {
           </p>
         )}
       </div>
+
+      <ModelSelectModal
+        isOpen={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        onSelect={pickModel}
+        selectedModel={model}
+        activeProviders={activeProviders}
+        modelAliases={modelAliases}
+        title="Select the upgrade model"
+      />
     </Card>
   );
 }

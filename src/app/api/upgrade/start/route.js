@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getApiKeys, getSettings } from "@/lib/localDb";
+import { getApiKeys, getSettings, updateSettings } from "@/lib/localDb";
 import { DEFAULT_REPO_PATH, startUpgrade } from "@/lib/upgrade/agent";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +42,8 @@ export async function POST(request) {
       apiKey,
       repoPath: process.env.UPGRADE_REPO_PATH || DEFAULT_REPO_PATH,
     });
+    // Remember the model that actually started, so the picker reopens on it.
+    await updateSettings({ upgradeModel: model });
     return NextResponse.json({ success: true, ...result });
   } catch (error) {
     console.error("Error starting upgrade agent:", error);
