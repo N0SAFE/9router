@@ -327,9 +327,13 @@ export async function buildModelsList(kindFilter, options = {}) {
   // cross-instance recursive loops.
   const skipDynamicFetch = options.skipDynamicFetch === true;
   let connections = [];
+  // Real (stored) connections decide the static-vs-live branch below; the
+  // synthetic no-auth entries must not turn "no connections" into a live catalog.
+  let hasRealConnections = false;
   try {
     connections = await getProviderConnections();
     connections = connections.filter(c => c.isActive !== false);
+    hasRealConnections = connections.length > 0;
     // No-auth (free) providers have no connection row but are routable, so add
     // a synthetic credential-free entry or their models never reach catalogs.
     connections = withNoAuthProviders(connections);
@@ -438,8 +442,8 @@ export async function buildModelsList(kindFilter, options = {}) {
     models.push(entry);
   }
 
-  if (connections.length === 0) {
-    // DB unavailable -> return static models, filtered by per-model kind
+  if (!hasRealConnections) {
+    // No stored connections -> return static models, filtered by per-model kind
     for (const [alias, providerModels] of Object.entries(PROVIDER_MODELS)) {
       const providerId = ALIAS_TO_PROVIDER_ID[alias] || alias;
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
