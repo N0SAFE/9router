@@ -38,8 +38,6 @@ export default {
     // `vision: true` is declared here so the capability travels with the model
     // list (`GET /v1/models` → bridge → VS Code) instead of clients guessing.
     { id: "deepseek-flash", name: "DeepSeek Flash", supportedFormats: ["openai"], vision: true, contextWindow: 1000000, maxOutput: 384000 },
-    // Live-catalog spelling of the same model (upstream /v1/models uses this id).
-    { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", supportedFormats: ["openai"], vision: true, contextWindow: 1000000, maxOutput: 384000 },
     { id: "glm-5.3-flash", name: "GLM 5.3 Flash (Vision)", supportedFormats: ["openai"] },
     { id: "glm-5.3", name: "GLM 5.3", supportedFormats: ["openai"] },
     { id: "glm-5.2", name: "GLM 5.2", supportedFormats: ["openai"] },
@@ -52,7 +50,7 @@ export default {
     { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", supportedFormats: ["openai", "claude", "openai-responses"] },
     { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", supportedFormats: ["openai", "claude", "openai-responses"] },
     { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek V4 Flash Vision (Exp)", supportedFormats: ["openai", "claude", "openai-responses"] },
-    { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", supportedFormats: ["openai", "claude", "openai-responses"] },
+    { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", supportedFormats: ["openai", "claude", "openai-responses"], vision: true, contextWindow: 1000000, maxOutput: 384000 },
     { id: "longcat-2.0", name: "LongCat 2.0", supportedFormats: ["openai"] },
     { id: "mimo-v2.6-flash", name: "MiMo V2.6 Flash", supportedFormats: ["openai"] },
     { id: "mimo-v2.6-pro", name: "MiMo V2.6 Pro", supportedFormats: ["openai"] },
