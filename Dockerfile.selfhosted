@@ -146,8 +146,11 @@ RUN mkdir -p /app/data && chown -R node:node /app && \
 
 # Data volume is owned by the unprivileged `node` user; the entrypoint re-asserts
 # ownership because a bind mount / fresh volume arrives owned by root. The git
-# exception lets the upgrade agent use the host-mounted checkout.
-RUN printf '#!/bin/sh\nset -e\nmkdir -p /app/data /app/data-home\nchown -R node:node /app/data /app/data-home 2>/dev/null || true\ngit config --system --add safe.directory "*" 2>/dev/null || true\nexec gosu node "$@"\n' > /entrypoint.sh \
+# exception lets the upgrade agent use the host-mounted checkout. Drop privileges
+# with `setpriv --keep-groups`, not gosu: gosu resets supplementary groups, which
+# discards the socket GID compose `group_add` grants the container and leaves the
+# upgrade agent unable to reach the Docker socket.
+RUN printf '#!/bin/sh\nset -e\nmkdir -p /app/data /app/data-home\nchown -R node:node /app/data /app/data-home 2>/dev/null || true\ngit config --system --add safe.directory "*" 2>/dev/null || true\nexec setpriv --reuid=node --regid=node --keep-groups "$@"\n' > /entrypoint.sh \
   && chmod +x /entrypoint.sh
 
 EXPOSE 20128
