@@ -23,7 +23,7 @@ services:
       dockerfile: Dockerfile.selfhosted
       args:
         # Keep in sync with package.json; used for the OCI version label only.
-        APP_VERSION: "0.5.85"
+        APP_VERSION: "0.5.104"
         # proxy,code,ml = full compression pipeline (AST + Kompress), matching
         # the host install. Use `HEADROOM_EXTRAS=proxy,code` to skip torch.
         HEADROOM_EXTRAS: ${HEADROOM_EXTRAS:-proxy,code,ml}
