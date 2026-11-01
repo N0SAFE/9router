@@ -78,6 +78,28 @@ function pipelineProxyEnv() {
   };
 }
 
+// Headroom's SSRF guard resolves x-headroom-base-url and fails closed when the
+// lookup misses its 3s budget; the handler reads that verdict as "no upstream
+// given" and reroutes to its default OpenAI target, so our provider key and the
+// prompt reach api.openai.com. Re-apply the vendor patch on every start: headroom
+// can be upgraded from the dashboard, which rewrites the patched file. Best
+// effort — an unpatched guard is the old behaviour, never worse.
+const GUARD_PATCH = path.join(process.cwd(), "scripts", "patch-headroom-ssrf-guard.py");
+
+function ensureGuardPatched() {
+  const python = findPython310();
+  if (!python || !fs.existsSync(GUARD_PATCH)) return;
+  try {
+    execFileSync(python, [GUARD_PATCH], {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      timeout: 15000,
+    });
+  } catch (e) {
+    console.warn(`[headroom] SSRF-guard patch failed: ${e.message}`);
+  }
+}
+
 export async function startHeadroomProxy({ port = DEFAULT_PORT, codeAware = false, kompress = true } = {}) {
   const safePort = Number(port) > 0 && Number(port) < 65536 ? Number(port) : DEFAULT_PORT;
   const binary = findHeadroomBinary();
@@ -86,6 +108,8 @@ export async function startHeadroomProxy({ port = DEFAULT_PORT, codeAware = fals
     err.code = "NOT_INSTALLED";
     throw err;
   }
+
+  ensureGuardPatched();
 
   const existing = getManagedPid();
   if (existing) return { pid: existing, alreadyRunning: true };

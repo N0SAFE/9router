@@ -87,6 +87,15 @@ RUN python3 -m venv /opt/headroom \
 
 ENV PATH="/opt/headroom/bin:${PATH}"
 
+# A rejected x-headroom-base-url is silently rerouted to Headroom's default
+# OpenAI target, so a DNS miss in its SSRF guard sends our provider key and the
+# prompt to api.openai.com. Ship the patcher and apply it, so the override is
+# authoritative while literal internal addresses stay refused; see its header.
+# 9Router re-runs it before every headroom start (src/lib/headroom/process.js),
+# which also covers a headroom upgrade from the dashboard.
+COPY --from=builder /app/scripts/patch-headroom-ssrf-guard.py ./scripts/patch-headroom-ssrf-guard.py
+RUN /opt/headroom/bin/python ./scripts/patch-headroom-ssrf-guard.py
+
 # --- Upgrade agent tooling ----------------------------------------------------
 # The dashboard's "Upgrade agent" button runs `opencode run` against the fork
 # checkout mounted at /workspace/9router, so the container carries the same CLI
